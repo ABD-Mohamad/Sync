@@ -1,0 +1,92 @@
+# docker-compose.yml
+version: '3.9'
+ 
+services:
+ 
+  # ─── PostgreSQL Database ───────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: sync_db
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - '5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${DB_USER} -d ${DB_NAME}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+ 
+  # ─── Redis ─────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: sync_redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+ 
+  # ─── Django Web Server ──────────────────────────────
+  web:
+    build: .
+    container_name: sync_web
+    restart: unless-stopped
+    env_file: .env
+    command: >
+      sh -c 'python sync/manage.py makemigrations accounts &&
+             python sync/manage.py makemigrations tasks &&
+             python sync/manage.py migrate &&
+             python sync/manage.py runserver 0.0.0.0:8000'
+    volumes:
+      - .:/app
+    ports:
+      - '8000:8000'
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+ 
+  # ─── Celery Worker (enable later) ──────────────────
+  # celery_worker:
+  #   build: .
+  #   container_name: sync_celery_worker
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   command: celery -A core worker --loglevel=info
+  #   volumes:
+  #     - .:/app
+  #   depends_on:
+  #     - db
+  #     - redis
+ 
+  # ─── Celery Beat Scheduler (enable later) ──────────
+  # celery_beat:
+  #   build: .
+  #   container_name: sync_celery_beat
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   command: celery -A core beat --loglevel=info --scheduler
+  #            django_celery_beat.schedulers:DatabaseScheduler
+  #   volumes:
+  #     - .:/app
+  #   depends_on:
+  #     - db
+  #     - redis
+ 
+# ─── Named Volumes ──────────────────────────────────
+volumes:
+  postgres_data:
+  redis_data:

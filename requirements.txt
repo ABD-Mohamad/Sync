@@ -1,0 +1,29 @@
+# requirements.txt
+ 
+# Django core
+Django==5.1.4
+djangorestframework==3.15.2
+ 
+# Database adapter
+psycopg2-binary==2.9.10
+ 
+# Environment variables
+python-decouple==3.8
+ 
+# Redis & Caching
+redis==5.2.1
+django-redis==5.4.0
+ 
+# Celery (install now, configure later)
+celery==5.4.0
+django-celery-beat==2.7.0
+django-celery-results==2.5.1
+ 
+# JWT Authentication
+djangorestframework-simplejwt==5.3.1
+ 
+# CORS headers
+django-cors-headers==4.6.0
+ 
+# Filtering
+django-filter==24.3
