@@ -1,8 +1,6 @@
 # docker-compose.yml
-version: '3.9'
- 
 services:
- 
+
   # ─── PostgreSQL Database ───────────────────────────
   db:
     image: postgres:16-alpine
@@ -22,7 +20,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
- 
+
   # ─── Redis ─────────────────────────────────────────
   redis:
     image: redis:7-alpine
@@ -37,7 +35,16 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
- 
+
+  # ─── Mailpit (dev email server) ─────────────────────
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: sync_mailpit
+    restart: unless-stopped
+    ports:
+      - '1025:1025'
+      - '8025:8025'
+
   # ─── Django Web Server ──────────────────────────────
   web:
     build: .
@@ -45,9 +52,7 @@ services:
     restart: unless-stopped
     env_file: .env
     command: >
-      sh -c 'python sync/manage.py makemigrations accounts &&
-             python sync/manage.py makemigrations tasks &&
-             python sync/manage.py migrate &&
+      sh -c 'python sync/manage.py migrate &&
              python sync/manage.py runserver 0.0.0.0:8000'
     volumes:
       - .:/app
@@ -58,7 +63,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
- 
+
   # ─── Celery Worker (enable later) ──────────────────
   # celery_worker:
   #   build: .
@@ -71,21 +76,20 @@ services:
   #   depends_on:
   #     - db
   #     - redis
- 
+
   # ─── Celery Beat Scheduler (enable later) ──────────
   # celery_beat:
   #   build: .
   #   container_name: sync_celery_beat
   #   restart: unless-stopped
   #   env_file: .env
-  #   command: celery -A core beat --loglevel=info --scheduler
-  #            django_celery_beat.schedulers:DatabaseScheduler
+  #   command: celery -A core beat --loglevel=info
   #   volumes:
   #     - .:/app
   #   depends_on:
   #     - db
   #     - redis
- 
+
 # ─── Named Volumes ──────────────────────────────────
 volumes:
   postgres_data:

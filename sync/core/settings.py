@@ -26,6 +26,8 @@ THIRD_PARTY_APPS = [
     'django_filters',
     'django_celery_beat',
     'django_celery_results',
+    'drf_spectacular',
+    'rest_framework_simplejwt.token_blacklist',
 ]
  
 LOCAL_APPS = [
@@ -38,13 +40,14 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 # ─── Middleware ───────────────────────────────────────────
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    'corsheaders.middleware.CorsMiddleware',   # Must be high up!
+    'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'apps.accounts.middleware.ForcePasswordChangeMiddleware',  
 ]
  
 ROOT_URLCONF = 'core.urls'
@@ -111,7 +114,8 @@ AUTH_PASSWORD_VALIDATORS = [
 # ─── DRF & JWT ────────────────────────────────────────────
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'apps.accounts.authentication.EmployeeJWTAuthentication',
+        'apps.accounts.authentication.UnifiedJWTAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -123,8 +127,15 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20,
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+
+    # ── Throttling ────────────────────────────────────────────
+    'DEFAULT_THROTTLE_CLASSES': [],   # applied per-view, not globally
+    'DEFAULT_THROTTLE_RATES': {
+        'login'    : '5/minute',   # max 5 login attempts per minute per IP
+        'sensitive': '10/minute',  # max 10 change-password attempts per minute
+    },
 }
- 
 from datetime import timedelta
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME':  timedelta(hours=1),
@@ -152,3 +163,34 @@ MEDIA_ROOT  = BASE_DIR / 'media'
  
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 AUTH_USER_MODEL = 'accounts.User'
+
+# ─── Email (Mailpit in dev) ───────────────────────────
+EMAIL_BACKEND   = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST      = config('EMAIL_HOST', default='mailpit')
+EMAIL_PORT      = config('EMAIL_PORT', default=1025, cast=int)
+EMAIL_USE_TLS   = False
+EMAIL_HOST_USER = ''
+EMAIL_HOST_PASSWORD = ''
+DEFAULT_FROM_EMAIL = 'Sync System <no-reply@sync.com>'
+
+# ─── Swagger (drf-spectacular) ────────────────────────
+SPECTACULAR_SETTINGS = {
+    'TITLE'                  : 'Sync API',
+    'DESCRIPTION'            : 'Task Management System API',
+    'VERSION'                : '1.0.0',
+    'SERVE_INCLUDE_SCHEMA'   : False,
+    'COMPONENT_SPLIT_REQUEST': True,
+    'SWAGGER_UI_SETTINGS'    : {
+        'persistAuthorization': True,
+    },
+    'APPEND_COMPONENTS': {
+        'securitySchemes': {
+            'BearerAuth': {
+                'type'        : 'http',
+                'scheme'      : 'bearer',
+                'bearerFormat': 'JWT',
+            }
+        }
+    },
+    'SECURITY': [{'BearerAuth': []}],
+}

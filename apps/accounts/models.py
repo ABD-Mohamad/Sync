@@ -21,14 +21,14 @@ class UserManager(BaseUserManager):
 
 class Role(models.Model):
     """
-    Defines the role of a system user (User table only).
-    Employees are independent and do not have system access roles.
+    Defines the role of a system user.
+    Values: IT, Department Head
     """
-    MANAGER         = 'manager'
+    IT              = 'it'
     DEPARTMENT_HEAD = 'department_head'
 
     ROLE_CHOICES = [
-        (MANAGER,         'Manager'),
+        (IT,              'IT'),
         (DEPARTMENT_HEAD, 'Department Head'),
     ]
 
@@ -47,9 +47,6 @@ class Role(models.Model):
 
 
 class Department(models.Model):
-    """
-    Organizational department.
-    """
     name = models.CharField(max_length=150, unique=True)
 
     head = models.ForeignKey(
@@ -60,14 +57,29 @@ class Department(models.Model):
         related_name='headed_departments',
     )
 
+    def clean(self):
+        """
+        Model-level validation — enforced everywhere:
+        admin panel, shell, serializer, management commands.
+        """
+        from django.core.exceptions import ValidationError
+        if (self.head
+                and self.head.role
+                and self.head.role.name != Role.DEPARTMENT_HEAD):
+            raise ValidationError(
+                f'{self.head.full_name} does not have the Department Head role.'
+            )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()  # always run clean() before saving
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return self.name
 
     class Meta:
         verbose_name = 'Department'
         verbose_name_plural = 'Departments'
-
-
 class User(AbstractUser):
     """
     System user — Managers and Department Heads only.
@@ -96,7 +108,7 @@ class User(AbstractUser):
 
     USERNAME_FIELD  = 'email'
     REQUIRED_FIELDS = ['full_name']
-
+    must_change_password = models.BooleanField(default=False)
     def __str__(self):
         return f'{self.full_name} ({self.email})'
 
@@ -133,6 +145,7 @@ class Employee(models.Model):
 
     # Mobile app authentication
     password   = models.CharField(max_length=128)  # stores hashed password
+    must_change_password = models.BooleanField(default=False)
     last_login = models.DateTimeField(null=True, blank=True)
 
     hired_at   = models.DateField(null=True, blank=True)
