@@ -14,6 +14,32 @@ class UserCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('Invalid role.')
         return role
 
+    def validate_email(self, email):
+        # Skip check on update (instance already exists)
+        if self.instance:
+            return email
+        if User.objects.filter(email=email).exists():
+            raise serializers.ValidationError(f'{email} is already registered.')
+        return email
+
+    def validate(self, data):
+        # When used with many=True, check for duplicates across the list
+        # by storing seen emails on the root serializer
+        root = self.parent
+        if isinstance(root, serializers.ListSerializer):
+            seen = getattr(root, '_seen_emails', set())
+            email = data.get('email', '').lower()
+            if email in seen:
+                raise serializers.ValidationError(
+                    {'email': f'{email} appears more than once in this request.'}
+                )
+            seen.add(email)
+            root._seen_emails = seen
+        return data
+
+
+
+
 
 class UserResponseSerializer(serializers.ModelSerializer):
     role       = serializers.StringRelatedField()
@@ -59,6 +85,25 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
                             'department', 'hired_at']
         read_only_fields = ['id']
 
+    def validate_email(self, email):
+        if self.instance:
+            return email
+        if Employee.objects.filter(email=email).exists():
+            raise serializers.ValidationError(f'{email} is already registered.')
+        return email
+
+    def validate(self, data):
+        root = self.parent
+        if isinstance(root, serializers.ListSerializer):
+            seen = getattr(root, '_seen_emails', set())
+            email = data.get('email', '').lower()
+            if email in seen:
+                raise serializers.ValidationError(
+                    {'email': f'{email} appears more than once in this request.'}
+                )
+            seen.add(email)
+            root._seen_emails = seen
+        return data
 
 class EmployeeResponseSerializer(serializers.ModelSerializer):
     department = serializers.StringRelatedField()

@@ -17,6 +17,7 @@ DJANGO_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    
 ]
  
 THIRD_PARTY_APPS = [
@@ -66,7 +67,8 @@ TEMPLATES = [
  
 WSGI_APPLICATION = 'core.wsgi.application'
 ASGI_APPLICATION = 'core.asgi.application'
- 
+ # ── Request Signing ───────────────────────────────────────────
+REQUEST_SIGNING_SECRET = config('REQUEST_SIGNING_SECRET')
 # ─── Database (PostgreSQL) ────────────────────────────────
 DATABASES = {
     'default': {
@@ -145,10 +147,10 @@ SIMPLE_JWT = {
  
 # ─── CORS ─────────────────────────────────────────────────
 CORS_ALLOWED_ORIGINS = [
-    'http://localhost:3000',   # React/Vue frontend dev server
-    'http://localhost:5173',   # Vite dev server
+    'http://localhost:4200',   # Angular dev server
 ]
- 
+
+CORS_ALLOW_CREDENTIALS = True  # allows cookies + auth headers to pass through
 # ─── Internationalization ─────────────────────────────────
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'Asia/Riyadh'    # ← adjust to your timezone

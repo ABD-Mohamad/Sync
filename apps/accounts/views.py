@@ -116,6 +116,57 @@ class UserViewSet(
             {'detail': 'User deactivated successfully.'},
             status=status.HTTP_200_OK,
         )
+    @extend_schema(
+        request=UserCreateSerializer(many=True),
+        responses={201: UserResponseSerializer(many=True)},
+        summary='Bulk create system users',
+        tags=['User Management'],
+    )
+    @action(detail=False, methods=['post'], url_path='bulk-create')
+    def bulk_create(self, request):
+        if not isinstance(request.data, list):
+            return Response(
+                {'detail': 'Expected a list of users.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not (2 <= len(request.data) <= 50):
+            return Response(
+                {'detail': 'Bulk create requires between 2 and 50 users.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = UserCreateSerializer(data=request.data, many=True)
+        serializer.is_valid(raise_exception=True)
+
+        created = []
+        failed  = []
+
+        for user_data in serializer.validated_data:
+            try:
+                temp_password = generate_temp_password()
+                user = User(
+                    full_name            = user_data['full_name'],
+                    email                = user_data['email'],
+                    role                 = user_data.get('role'),
+                    department           = user_data.get('department'),
+                    must_change_password = True,
+                )
+                user.set_password(temp_password)
+                user.save()
+                send_user_welcome_email(user, temp_password)
+                created.append(user)
+            except Exception as e:
+                failed.append({'email': user_data.get('email'), 'reason': str(e)})
+
+        response_data = {
+            'created': UserResponseSerializer(created, many=True).data,
+            'count'  : len(created),
+        }
+        if failed:
+            response_data['failed'] = failed
+
+        return Response(response_data, status=status.HTTP_201_CREATED)
+
 
 
 class EmployeeViewSet(
@@ -209,6 +260,57 @@ class EmployeeViewSet(
             {'detail': 'Employee deactivated successfully.'},
             status=status.HTTP_200_OK,
         )
+    @extend_schema(
+    request=EmployeeCreateSerializer(many=True),
+    responses={201: EmployeeResponseSerializer(many=True)},
+    summary='Bulk create employees',
+    tags=['Employee Management'],
+)
+    @action(detail=False, methods=['post'], url_path='bulk-create')
+    def bulk_create(self, request):
+        if not isinstance(request.data, list):
+            return Response(
+                {'detail': 'Expected a list of employees.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not (2 <= len(request.data) <= 50):
+            return Response(
+                {'detail': 'Bulk create requires between 2 and 50 employees.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = EmployeeCreateSerializer(data=request.data, many=True)
+        serializer.is_valid(raise_exception=True)
+
+        created = []
+        failed  = []
+
+        for employee_data in serializer.validated_data:
+            try:
+                temp_password = generate_temp_password()
+                employee = Employee(
+                    full_name            = employee_data['full_name'],
+                    email                = employee_data['email'],
+                    phone                = employee_data.get('phone', ''),
+                    department           = employee_data.get('department'),
+                    hired_at             = employee_data.get('hired_at'),
+                    must_change_password = True,
+                )
+                employee.set_password(temp_password)
+                employee.save()
+                send_employee_welcome_email(employee, temp_password)
+                created.append(employee)
+            except Exception as e:
+                failed.append({'email': employee_data.get('email'), 'reason': str(e)})
+
+        response_data = {
+            'created': EmployeeResponseSerializer(created, many=True).data,
+            'count'  : len(created),
+        }
+        if failed:
+            response_data['failed'] = failed
+
+        return Response(response_data, status=status.HTTP_201_CREATED)
 class AuthViewSet(viewsets.GenericViewSet):
     permission_classes = [AllowAny]
 
