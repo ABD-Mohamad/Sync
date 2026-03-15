@@ -1,7 +1,10 @@
 # apps/accounts/models.py
 from django.db import models
 from django.contrib.auth.models import AbstractUser, BaseUserManager
-
+from django.core.validators import RegexValidator
+from django.core.exceptions import ValidationError
+from django.db.models.signals import post_save
+from django.dispatch          import receiver
 
 class UserManager(BaseUserManager):
     def create_user(self, email, full_name, password=None, **extra_fields):
@@ -167,3 +170,65 @@ class Employee(models.Model):
         verbose_name = 'Employee'
         verbose_name_plural = 'Employees'
         ordering = ['full_name']
+
+
+def validate_image_size(image):
+    if image.size > 2 * 1024 * 1024:
+        raise ValidationError('Image size must not exceed 2MB.')
+
+
+class Profile(models.Model):
+    """
+    Extended profile for system Users.
+    One-to-One relationship — created automatically when a User is created.
+    Profile picture is stored in Supabase S3 bucket.
+    """
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name='profile',
+    )
+
+    # ── Required Fields ───────────────────────────────────────
+    degree          = models.CharField(max_length=200, blank=True)
+    profile_picture = models.ImageField(
+        upload_to  ='profiles/',
+        null=True, blank=True,
+        validators=[validate_image_size],
+    )
+    date_of_birth   = models.DateField(null=True, blank=True)
+
+    # ── Additional Fields ─────────────────────────────────────
+    phone_number = models.CharField(
+        max_length=20,
+        blank=True,
+        validators=[
+            RegexValidator(
+                regex   =r'^\+?1?\d{9,15}$',
+                message ='Phone number must be in format: +999999999 (9–15 digits).',
+            )
+        ],
+    )
+    bio          = models.TextField(blank=True)
+    skills       = models.JSONField(default=list, blank=True)
+    linkedin_url = models.URLField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'Profile — {self.user.full_name}'
+
+    class Meta:
+        verbose_name        = 'Profile'
+        verbose_name_plural = 'Profiles'
+
+@receiver(post_save, sender=User)
+def create_user_profile(sender, instance, created, **kwargs):
+    if created:
+        Profile.objects.create(user=instance)
+
+@receiver(post_save, sender=User)
+def save_user_profile(sender, instance, **kwargs):
+    if hasattr(instance, 'profile'):
+        instance.profile.save()

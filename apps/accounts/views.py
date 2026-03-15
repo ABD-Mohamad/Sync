@@ -10,12 +10,12 @@ from rest_framework_simplejwt.tokens     import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from drf_spectacular.utils       import extend_schema, OpenApiResponse
 
-from apps.accounts.models      import User, Employee, Department
+from apps.accounts.models      import User, Employee, Department,Profile
 from apps.accounts.serializers import (
     UserCreateSerializer, UserResponseSerializer,
     EmployeeCreateSerializer, EmployeeResponseSerializer,
     UserProfileSerializer, DepartmentSerializer,
-    UnifiedLoginSerializer, UnifiedChangePasswordSerializer,
+    UnifiedLoginSerializer, UnifiedChangePasswordSerializer, ProfileSerializer
 )
 from apps.accounts.permissions import IsITOrAdmin
 from apps.accounts.throttles   import LoginRateThrottle, SensitiveEndpointThrottle
@@ -578,3 +578,47 @@ class DepartmentViewSet(
     @audit_action(action='delete', resource='Department')
     def destroy(self, request, *args, **kwargs):
         return super().destroy(request, *args, **kwargs)
+
+class ProfileViewSet(viewsets.GenericViewSet):
+    """
+    GET  /api/accounts/profile/   — retrieve current user's profile
+    PATCH /api/accounts/profile/  — partial update including image upload
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class   = ProfileSerializer
+
+    def get_object(self):
+        # Always return the profile of the currently logged-in user
+        profile, _ = Profile.objects.get_or_create(user=self.request.user)
+        return profile
+
+    @extend_schema(
+        responses={200: ProfileSerializer},
+        summary='Get current user profile',
+        tags=['Profile'],
+    )
+    @action(detail=False, methods=['get'], url_path='me')
+    def retrieve_profile(self, request):
+        profile    = self.get_object()
+        serializer = ProfileSerializer(profile, context={'request': request})
+        return Response(serializer.data)
+
+    @extend_schema(
+        request=ProfileSerializer,
+        responses={200: ProfileSerializer},
+        summary='Update current user profile',
+        tags=['Profile'],
+    )
+    @audit_action(action='update', resource='Profile')
+    @action(detail=False, methods=['patch'], url_path='update')
+    def update_profile(self, request):
+        profile    = self.get_object()
+        serializer = ProfileSerializer(
+            profile,
+            data=request.data,
+            partial=True,
+            context={'request': request},
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)

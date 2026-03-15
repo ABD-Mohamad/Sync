@@ -5,6 +5,7 @@ from apps.accounts.views import (
     EmployeeViewSet,
     AuthViewSet,
     DepartmentViewSet,
+    ProfileViewSet,
 )
 
 router = DefaultRouter()
@@ -13,5 +14,6 @@ router.register(r'users',       UserViewSet,       basename='user')
 router.register(r'employees',   EmployeeViewSet,   basename='employee')
 router.register(r'auth',        AuthViewSet,       basename='auth')
 router.register(r'departments', DepartmentViewSet, basename='department')
+router.register(r'profile',     ProfileViewSet,    basename='profile')
 
 urlpatterns = router.urls
