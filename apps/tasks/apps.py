@@ -1,6 +1,10 @@
 # apps/tasks/apps.py
 from django.apps import AppConfig
 
+
 class TasksConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
-    name = 'apps.tasks'  # ← same here
+    name               = 'apps.tasks'
+
+    def ready(self):
+        import apps.tasks.signals  # noqa — register MainTask + SubTask signals

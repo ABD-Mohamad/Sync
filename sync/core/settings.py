@@ -11,6 +11,7 @@ ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost').split(',')
  
 # ─── Applications ────────────────────────────────────────
 DJANGO_APPS = [
+    'daphne',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -29,11 +30,13 @@ THIRD_PARTY_APPS = [
     'django_celery_results',
     'drf_spectacular',
     'rest_framework_simplejwt.token_blacklist',
+    'channels',
 ]
  
 LOCAL_APPS = [
     'apps.accounts',
     'apps.tasks',
+    'apps.notifications',
 ]
  
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
@@ -145,7 +148,6 @@ SIMPLE_JWT = {
     'ROTATE_REFRESH_TOKENS': True,
 }
  
-# ─── CORS ─────────────────────────────────────────────────
 # ── CORS ──────────────────────────────────────────────────────
 CORS_ALLOWED_ORIGINS    = ['http://localhost:4200']
 CORS_ALLOW_CREDENTIALS  = True   # required for cookies to cross origins
@@ -228,3 +230,16 @@ AWS_S3_CUSTOM_DOMAIN = (
     f"{config('SUPABASE_ENDPOINT_URL').rstrip('/')}/"
     f"{config('SUPABASE_BUCKET_NAME')}"
 )
+# ── Channels ──────────────────────────────────────────────────
+#
+
+ASGI_APPLICATION = 'core.asgi.application'
+
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels_redis.core.RedisChannelLayer',
+        'CONFIG' : {
+            'hosts': [('redis', 6379)],
+        },
+    },
+}
