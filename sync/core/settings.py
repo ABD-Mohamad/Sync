@@ -146,11 +146,22 @@ SIMPLE_JWT = {
 }
  
 # ─── CORS ─────────────────────────────────────────────────
-CORS_ALLOWED_ORIGINS = [
-    'http://localhost:4200',   # Angular dev server
-]
+# ── CORS ──────────────────────────────────────────────────────
+CORS_ALLOWED_ORIGINS    = ['http://localhost:4200']
+CORS_ALLOW_CREDENTIALS  = True   # required for cookies to cross origins
 
-CORS_ALLOW_CREDENTIALS = True  # allows cookies + auth headers to pass through
+# ── Cookie Settings ───────────────────────────────────────────
+COOKIE_HTTPONLY  = True
+COOKIE_SECURE    = config('COOKIE_SECURE', default=False, cast=bool)  # True in production
+COOKIE_SAMESITE  = config('COOKIE_SAMESITE', default='Lax')           # 'None' if cross-domain HTTPS
+
+ACCESS_TOKEN_LIFETIME_SECONDS  = 60 * 60        # 1 hour
+REFRESH_TOKEN_LIFETIME_SECONDS = 60 * 60 * 24   # 24 hours
+
+# ── CSRF ──────────────────────────────────────────────────────
+CSRF_TRUSTED_ORIGINS = ['http://localhost:4200']
+CSRF_COOKIE_HTTPONLY = False    # Angular must be able to read the CSRF cookie
+CSRF_COOKIE_SAMESITE = 'Lax'
 # ─── Internationalization ─────────────────────────────────
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'Asia/Riyadh'    # ← adjust to your timezone

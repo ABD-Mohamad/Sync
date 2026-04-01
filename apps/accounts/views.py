@@ -316,7 +316,7 @@ class AuthViewSet(viewsets.GenericViewSet):
 
     @extend_schema(
         request=UnifiedLoginSerializer,
-        responses={200: OpenApiResponse(description='JWT tokens + profile')},
+        responses={200: OpenApiResponse(description='JWT tokens set as cookies + profile')},
         summary='Login — works for all account types',
         tags=['Auth'],
     )
@@ -325,38 +325,48 @@ class AuthViewSet(viewsets.GenericViewSet):
         throttle_classes=[LoginRateThrottle],
     )
     def login(self, request):
+        from apps.accounts.cookies import set_auth_cookies
+
         serializer = UnifiedLoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         email    = serializer.validated_data['email']
         password = serializer.validated_data['password']
 
-        # ── Try User first ────────────────────────────────────
+        # ── Try User first ────────────────────────────────────────────
         user = authenticate(request, email=email, password=password)
-        if user:
+        if user is not None:
             if not user.is_active:
                 return Response(
                     {'detail': 'Account is inactive.'},
                     status=status.HTTP_403_FORBIDDEN,
                 )
-
-            # Log login audit
             AuditLog.objects.create(
-                actor=user,
-                action=AuditLog.Action.LOGIN,
-                resource='User',
-                resource_id=str(user.id),
+                actor=user, action=AuditLog.Action.LOGIN,
+                resource='User', resource_id=str(user.id),
                 ip_address=get_client_ip(request),
             )
-
-            return Response({
+            tokens   = get_tokens_for_user(user)
+            response = Response({
                 'account_type'        : 'user',
                 'must_change_password': user.must_change_password,
                 'profile'             : UserResponseSerializer(user).data,
-                **get_tokens_for_user(user),
             })
+            return set_auth_cookies(response, tokens['access'], tokens['refresh'])
 
-        # ── Try Employee ──────────────────────────────────────
+        # authenticate() returned None — could be wrong password OR inactive user
+        # Check if the user exists but is inactive to return the correct status code
+        try:
+            existing_user = User.objects.get(email=email)
+            if not existing_user.is_active:
+                return Response(
+                    {'detail': 'Account is inactive.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        except User.DoesNotExist:
+            pass
+
+        # ── Try Employee ──────────────────────────────────────────────
         try:
             employee = Employee.objects.get(email=email)
         except Employee.DoesNotExist:
@@ -380,12 +390,13 @@ class AuthViewSet(viewsets.GenericViewSet):
         employee.last_login = timezone.now()
         employee.save(update_fields=['last_login'])
 
-        return Response({
+        tokens   = get_tokens_for_employee(employee)
+        response = Response({
             'account_type'        : 'employee',
             'must_change_password': employee.must_change_password,
             'profile'             : EmployeeResponseSerializer(employee).data,
-            **get_tokens_for_employee(employee),
         })
+        return set_auth_cookies(response, tokens['access'], tokens['refresh'])
 
     @extend_schema(
         request=UnifiedChangePasswordSerializer,
@@ -420,13 +431,11 @@ class AuthViewSet(viewsets.GenericViewSet):
                     {'detail': 'Employee not found.'},
                     status=status.HTTP_404_NOT_FOUND,
                 )
-
             if not employee.check_password(old_password):
                 return Response(
                     {'detail': 'Old password is incorrect.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
             employee.set_password(new_password)
             employee.must_change_password = False
             employee.save()
@@ -439,13 +448,11 @@ class AuthViewSet(viewsets.GenericViewSet):
                     {'detail': 'Authentication required.'},
                     status=status.HTTP_401_UNAUTHORIZED,
                 )
-
             if not user.check_password(old_password):
                 return Response(
                     {'detail': 'Old password is incorrect.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
             user.set_password(new_password)
             user.must_change_password = False
             user.save()
@@ -455,19 +462,22 @@ class AuthViewSet(viewsets.GenericViewSet):
     @extend_schema(
         summary='Refresh token — works for all account types',
         tags=['Auth'],
-        request=OpenApiResponse(description='{"refresh": "<token>"}'),
-        responses={200: OpenApiResponse(description='New access (+ refresh for employees)')},
     )
     @action(detail=False, methods=['post'], url_path='refresh')
     def refresh(self, request):
-        raw_refresh = request.data.get('refresh')
+        from apps.accounts.cookies import set_auth_cookies
+
+        raw_refresh = (
+            request.COOKIES.get('refresh_token')
+            or request.data.get('refresh')
+        )
+
         if not raw_refresh:
             return Response(
                 {'detail': 'Refresh token required.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ── Peek at the token to decide which flow ────────────
         try:
             peeked = RefreshToken(raw_refresh)
         except TokenError:
@@ -485,16 +495,16 @@ class AuthViewSet(viewsets.GenericViewSet):
                     {'detail': str(e)},
                     status=status.HTTP_401_UNAUTHORIZED,
                 )
-            return Response(tokens)
+            response = Response({'detail': 'Token refreshed.'})
+            return set_auth_cookies(response, tokens['access'], tokens['refresh'])
 
-        # ── User refresh (standard simplejwt flow) ────────────
+        # ── User refresh ──────────────────────────────────────
         try:
             peeked.blacklist()
-            from apps.accounts.models import User as UserModel
-            user = UserModel.objects.select_related('role').get(
-                id=peeked['user_id']
-            )
-            return Response(get_tokens_for_user(user))
+            user     = User.objects.select_related('role').get(id=peeked['user_id'])
+            tokens   = get_tokens_for_user(user)
+            response = Response({'detail': 'Token refreshed.'})
+            return set_auth_cookies(response, tokens['access'], tokens['refresh'])
         except Exception:
             return Response(
                 {'detail': 'Invalid or expired refresh token.'},
@@ -506,39 +516,50 @@ class AuthViewSet(viewsets.GenericViewSet):
         summary='Get profile — system users only',
         tags=['Auth'],
     )
-    @action(detail=False, methods=['get'], url_path='profile',
-            permission_classes=[IsAuthenticated])
+    @action(
+        detail=False, methods=['get'], url_path='profile',
+        permission_classes=[IsAuthenticated],
+    )
     def profile(self, request):
         return Response(UserProfileSerializer(request.user).data)
 
     @extend_schema(
-        summary='Logout — blacklist refresh token',
+        summary='Logout — clears auth cookies and blacklists refresh token',
         tags=['Auth'],
     )
-    @action(detail=False, methods=['post'], url_path='logout',
-            permission_classes=[IsAuthenticated])
+    @action(
+        detail=False, methods=['post'], url_path='logout',
+        permission_classes=[AllowAny],
+    )
     def logout(self, request):
-        try:
-            token = RefreshToken(request.data.get('refresh'))
-            token.blacklist()
+        from apps.accounts.cookies import clear_auth_cookies
 
-            # Log logout audit (only for Users, not employees)
-            if request.user and request.user.is_authenticated:
-                AuditLog.objects.create(
-                    actor=request.user,
-                    action=AuditLog.Action.LOGOUT,
-                    resource='User',
-                    resource_id=str(request.user.id),
-                    ip_address=get_client_ip(request),
-                )
+        raw_refresh = (
+            request.COOKIES.get('refresh_token')
+            or request.data.get('refresh')
+        )
 
-            return Response({'detail': 'Logged out successfully.'})
-        except Exception:
-            return Response(
-                {'detail': 'Invalid or expired token.'},
-                status=status.HTTP_400_BAD_REQUEST,
+        if raw_refresh:
+            try:
+                RefreshToken(raw_refresh).blacklist()
+            except Exception:
+                pass
+
+        # Only log for Django Users
+        if request.user and request.user.is_authenticated:
+            AuditLog.objects.create(
+                actor=request.user,
+                action=AuditLog.Action.LOGOUT,
+                resource='User',
+                resource_id=str(request.user.id),
+                ip_address=get_client_ip(request),
             )
 
+        response = Response(
+            {'detail': 'Logged out successfully.'},
+            status=status.HTTP_200_OK,
+        )
+        return clear_auth_cookies(response)
 
 class DepartmentViewSet(
     mixins.CreateModelMixin,
