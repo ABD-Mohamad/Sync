@@ -68,7 +68,12 @@ def audit_action(action, resource):
             # Only log on success (2xx responses)
             if response.status_code < 300:
                 actor = request.user if request.user.is_authenticated else None
-                resource_id = str(response.data.get('id', '')) if hasattr(response, 'data') else ''
+                
+                resource_id = ''
+                if hasattr(response, 'data') and isinstance(response.data, dict):
+                    resource_id = str(response.data.get('id', ''))
+                if not resource_id and 'pk' in kwargs:
+                    resource_id = str(kwargs.get('pk'))
 
                 AuditLog.objects.create(
                     actor=actor,

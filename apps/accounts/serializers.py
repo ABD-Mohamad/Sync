@@ -7,13 +7,7 @@ from .models        import User, Employee, Role, Department, Profile
 # ─── Mixins ───────────────────────────────────────────────────
 
 class UniqueEmailMixin:
-    """
-    Reusable email validation for any serializer.
-    - Skips check on update (instance already exists)
-    - Checks DB uniqueness on create
-    - Detects duplicates across bulk requests via ListSerializer
-    """
-    email_model = None  # set in each serializer
+    email_model = None
 
     def validate_email(self, email):
         if self.instance:
@@ -53,24 +47,31 @@ class UserCreateSerializer(UniqueEmailMixin, serializers.ModelSerializer):
 
 
 class UserResponseSerializer(serializers.ModelSerializer):
-    role       = serializers.StringRelatedField()
+    role       = serializers.SlugRelatedField(slug_field='name', read_only=True)
     department = serializers.StringRelatedField()
 
     class Meta:
         model  = User
-        fields = ['id', 'full_name', 'email', 'role',
-                  'department', 'must_change_password']
+        # FIX #2: is_superuser added so login response carries the flag.
+        # The frontend isIT() computed signal depends on this field.
+        fields = [
+            'id', 'email', 'full_name', 'role',
+            'department', 'must_change_password', 'is_superuser',
+        ]
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
-    role        = serializers.StringRelatedField()
+    role        = serializers.SlugRelatedField(slug_field='name', read_only=True)
     department  = serializers.StringRelatedField()
     permissions = serializers.SerializerMethodField()
 
     class Meta:
         model  = User
-        fields = ['id', 'full_name', 'email', 'role',
-                  'department', 'must_change_password', 'permissions']
+        # FIX #2: is_superuser added here as well for profile endpoint.
+        fields = [
+            'id', 'email', 'full_name', 'role',
+            'department', 'must_change_password', 'is_superuser', 'permissions',
+        ]
 
     def get_permissions(self, obj):
         if obj.is_superuser:
@@ -113,12 +114,24 @@ class EmployeeResponseSerializer(serializers.ModelSerializer):
 # ─── Department Serializers ───────────────────────────────────
 
 class DepartmentSerializer(serializers.ModelSerializer):
-    head_name = serializers.SerializerMethodField()
+    head_name      = serializers.SerializerMethodField()
+    employee_count = serializers.IntegerField(read_only=True, required=False)
+    task_count     = serializers.IntegerField(read_only=True, required=False)
 
     class Meta:
         model            = Department
-        fields           = ['id', 'name', 'head', 'head_name']
+        fields           = ['id', 'name', 'head', 'head_name', 'employee_count', 'task_count']
         read_only_fields = ['id']
+
+    def to_representation(self, instance):
+        if not instance.head:
+            head = User.objects.filter(
+                department=instance,
+                role__name=Role.DEPARTMENT_HEAD,
+            ).first()
+            if head:
+                instance.head = head
+        return super().to_representation(instance)
 
     def get_head_name(self, obj):
         return obj.head.full_name if obj.head else None
@@ -142,6 +155,11 @@ class UnifiedChangePasswordSerializer(serializers.Serializer):
     old_password     = serializers.CharField(write_only=True)
     new_password     = serializers.CharField(write_only=True, min_length=8)
     confirm_password = serializers.CharField(write_only=True)
+
+    def validate_new_password(self, value):
+        from django.contrib.auth.password_validation import validate_password
+        validate_password(value)   # runs all AUTH_PASSWORD_VALIDATORS
+        return value
 
     def validate(self, data):
         if data['new_password'] != data['confirm_password']:

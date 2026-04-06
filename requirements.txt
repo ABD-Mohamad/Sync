@@ -35,3 +35,4 @@ Pillow==10.2.0
 channels==4.0.0
 channels-redis==4.2.0
 daphne==4.0.0
+drf-nested-routers==0.93.4

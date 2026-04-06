@@ -28,7 +28,7 @@ from apps.accounts.utils import (
     send_employee_welcome_email,
 )
 from apps.accounts.audit import audit_action, AuditLog, get_client_ip
-
+from apps.accounts.cookies import set_auth_cookies
 
 class UserViewSet(
     mixins.CreateModelMixin,
@@ -311,6 +311,7 @@ class EmployeeViewSet(
             response_data['failed'] = failed
 
         return Response(response_data, status=status.HTTP_201_CREATED)
+        
 class AuthViewSet(viewsets.GenericViewSet):
     permission_classes = [AllowAny]
 
@@ -325,7 +326,7 @@ class AuthViewSet(viewsets.GenericViewSet):
         throttle_classes=[LoginRateThrottle],
     )
     def login(self, request):
-        from apps.accounts.cookies import set_auth_cookies
+        
 
         serializer = UnifiedLoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -569,8 +570,14 @@ class DepartmentViewSet(
     mixins.DestroyModelMixin,
     viewsets.GenericViewSet,
 ):
-    queryset         = Department.objects.select_related('head').all()
     serializer_class = DepartmentSerializer
+
+    def get_queryset(self):
+        from django.db.models import Count
+        return Department.objects.select_related('head').annotate(
+            employee_count=Count('employees', distinct=True),
+            task_count=Count('main_tasks', distinct=True)
+        )
 
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:
@@ -598,8 +605,14 @@ class DepartmentViewSet(
     @extend_schema(summary='Delete a department', tags=['Departments'])
     @audit_action(action='delete', resource='Department')
     def destroy(self, request, *args, **kwargs):
-        return super().destroy(request, *args, **kwargs)
-
+        from django.db.models import ProtectedError
+        try:
+            return super().destroy(request, *args, **kwargs)
+        except ProtectedError:
+            return Response(
+                {"detail": "Cannot delete this department because it still has employees or tasks assigned to it."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 class ProfileViewSet(viewsets.GenericViewSet):
     """
     GET  /api/accounts/profile/   — retrieve current user's profile

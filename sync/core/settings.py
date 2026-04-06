@@ -1,7 +1,7 @@
 # sync/core/settings.py
 from pathlib import Path
 from decouple import config
- 
+from corsheaders.defaults import default_headers 
 BASE_DIR = Path(__file__).resolve().parent.parent
  
 # ─── Security ────────────────────────────────────────────
@@ -51,9 +51,10 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'apps.accounts.middleware.InactivityTimeoutMiddleware',
     'apps.accounts.middleware.ForcePasswordChangeMiddleware',  
 ]
- 
+SESSION_INACTIVITY_TIMEOUT = 60 * 30
 ROOT_URLCONF = 'core.urls'
  
 TEMPLATES = [
@@ -148,17 +149,23 @@ SIMPLE_JWT = {
     'ROTATE_REFRESH_TOKENS': True,
 }
  
+
+
 # ── CORS ──────────────────────────────────────────────────────
 CORS_ALLOWED_ORIGINS    = ['http://localhost:4200']
-CORS_ALLOW_CREDENTIALS  = True   # required for cookies to cross origins
+CORS_ALLOW_CREDENTIALS  = True  
+
+
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    'x-signature',
+    'x-timestamp',
+]
 
 # ── Cookie Settings ───────────────────────────────────────────
 COOKIE_HTTPONLY  = True
-COOKIE_SECURE    = config('COOKIE_SECURE', default=False, cast=bool)  # True in production
-COOKIE_SAMESITE  = config('COOKIE_SAMESITE', default='Lax')           # 'None' if cross-domain HTTPS
+COOKIE_SECURE    = config('COOKIE_SECURE', default=False, cast=bool)
+COOKIE_SAMESITE  = config('COOKIE_SAMESITE', default='Lax')           
 
-ACCESS_TOKEN_LIFETIME_SECONDS  = 60 * 60        # 1 hour
-REFRESH_TOKEN_LIFETIME_SECONDS = 60 * 60 * 24   # 24 hours
 
 # ── CSRF ──────────────────────────────────────────────────────
 CSRF_TRUSTED_ORIGINS = ['http://localhost:4200']
@@ -243,3 +250,12 @@ CHANNEL_LAYERS = {
         },
     },
 }
+
+AUTH_PASSWORD_VALIDATORS = [
+    {
+        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
+    },
+    {
+        'NAME': 'apps.accounts.validators.StrongPasswordValidator',
+    },
+]

@@ -6,6 +6,7 @@ from django.core.exceptions import ValidationError
 from django.db.models.signals import post_save
 from django.dispatch          import receiver
 
+
 class UserManager(BaseUserManager):
     def create_user(self, email, full_name, password=None, **extra_fields):
         if not email:
@@ -232,3 +233,24 @@ def create_user_profile(sender, instance, created, **kwargs):
 def save_user_profile(sender, instance, **kwargs):
     if hasattr(instance, 'profile'):
         instance.profile.save()
+
+
+
+@receiver(post_save, sender=User)
+def sync_department_head(sender, instance, **kwargs):
+    if not instance.role or instance.role.name != Role.DEPARTMENT_HEAD:
+        return
+
+    # Clear this user from any other department they were head of
+    for dept in Department.objects.filter(head=instance).exclude(
+        id=instance.department_id
+    ):
+        dept.head = None
+        dept.save(update_fields=['head'])
+
+    # Set them as head of their current department
+    if instance.department_id:
+        dept = Department.objects.get(id=instance.department_id)
+        if dept.head != instance:
+            dept.head = instance
+            dept.save(update_fields=['head'])

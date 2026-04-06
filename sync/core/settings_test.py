@@ -80,3 +80,5 @@ COOKIE_SAMESITE = 'Lax'
 
 # ── Media ─────────────────────────────────────────────────────────────────────
 MEDIA_ROOT = '/tmp/sync_test_media'
+
+SESSION_INACTIVITY_TIMEOUT = 60 * 60 * 24
