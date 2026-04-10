@@ -52,11 +52,10 @@ class UserResponseSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = User
-        # FIX #2: is_superuser added so login response carries the flag.
-        # The frontend isIT() computed signal depends on this field.
         fields = [
             'id', 'email', 'full_name', 'role',
-            'department', 'must_change_password', 'is_superuser',
+            'department', 'must_change_password',
+            'is_superuser',    
         ]
 
 

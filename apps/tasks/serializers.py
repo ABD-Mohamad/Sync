@@ -336,3 +336,113 @@ class RequestResponseSerializer(serializers.ModelSerializer):
 
     def get_employee_name(self, obj):
         return obj.employee.full_name
+
+# ─── Dashboard Serializers ────────────────────────────────────
+
+class KPIManagerSerializer(serializers.Serializer):
+    total_active_tasks = serializers.IntegerField()
+    overall_progress   = serializers.FloatField()
+    dept_efficiency    = serializers.FloatField()
+    critical_delays    = serializers.IntegerField()
+
+
+class PerformanceScorecardSerializer(serializers.Serializer):
+    avg_completion_rate = serializers.FloatField()
+    avg_delay_rate      = serializers.FloatField()
+    quality_score       = serializers.FloatField()
+    total_employees     = serializers.IntegerField()
+
+
+class WarningEntrySerializer(serializers.Serializer):
+    id              = serializers.IntegerField()
+    full_name       = serializers.CharField()
+    email           = serializers.EmailField()
+    dept_name       = serializers.CharField(allow_null=True)
+    delay_rate      = serializers.FloatField()
+    completion_rate = serializers.FloatField()
+
+
+class TopPerformerSerializer(serializers.Serializer):
+    id               = serializers.IntegerField()
+    full_name        = serializers.CharField()
+    dept_name        = serializers.CharField(allow_null=True)
+    completion_rate  = serializers.FloatField()
+    delay_rate       = serializers.FloatField()
+    performance_score = serializers.FloatField()
+
+
+class LatestTaskSerializer(serializers.Serializer):
+    id        = serializers.IntegerField()
+    title     = serializers.CharField()
+    priority  = serializers.CharField()
+    status    = serializers.CharField()
+    due_date  = serializers.DateField(allow_null=True)
+    dept_name = serializers.CharField(allow_null=True)
+    head_name = serializers.CharField(allow_null=True)
+
+
+class ManagerDashboardSerializer(serializers.Serializer):
+    kpi                   = KPIManagerSerializer()
+    latest_tasks          = LatestTaskSerializer(many=True)
+    performance_scorecard = PerformanceScorecardSerializer()
+    warning_list          = WarningEntrySerializer(many=True)
+    top_performers        = TopPerformerSerializer(many=True)
+
+
+# ── Employee Dashboard ────────────────────────────────────────
+
+class KPIEmployeeSerializer(serializers.Serializer):
+    assigned_tasks       = serializers.IntegerField()
+    in_progress          = serializers.IntegerField()
+    completed_this_month = serializers.IntegerField()
+    pending_requests     = serializers.IntegerField()
+
+
+class UpcomingDeadlineSerializer(serializers.Serializer):
+    id              = serializers.IntegerField()
+    title           = serializers.CharField()
+    main_task_title = serializers.CharField()
+    dept_name       = serializers.CharField(allow_null=True)
+    due_date        = serializers.DateField()
+    status          = serializers.CharField()
+
+
+class VelocityEntrySerializer(serializers.Serializer):
+    day       = serializers.CharField()
+    date      = serializers.CharField()
+    completed = serializers.IntegerField()
+
+
+class EmployeeDashboardSerializer(serializers.Serializer):
+    kpi                = KPIEmployeeSerializer()
+    upcoming_deadlines = UpcomingDeadlineSerializer(many=True)
+    velocity           = VelocityEntrySerializer(many=True)
+    priority_mix       = serializers.DictField(child=serializers.FloatField())
+
+
+# ── Employee Performance Directory ────────────────────────────
+
+class PerformanceSummarySerializer(serializers.Serializer):
+    total_staff      = serializers.IntegerField()
+    avg_performance  = serializers.FloatField()
+    avg_delay_rate   = serializers.FloatField()
+    compliance_rate  = serializers.FloatField()
+    critical_delays  = serializers.IntegerField()
+
+
+class EmployeePerformanceSerializer(serializers.Serializer):
+    id                = serializers.IntegerField()
+    full_name         = serializers.CharField()
+    email             = serializers.EmailField()
+    dept_name         = serializers.CharField(allow_null=True)
+    status            = serializers.CharField()
+    total_sub         = serializers.IntegerField()
+    completion_rate   = serializers.FloatField()
+    delay_rate        = serializers.FloatField()
+    performance_score = serializers.FloatField()
+    performance_label = serializers.CharField()
+
+
+class EmployeeDirectorySerializer(serializers.Serializer):
+    summary   = PerformanceSummarySerializer()
+    employees = EmployeePerformanceSerializer(many=True)

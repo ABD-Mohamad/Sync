@@ -6,7 +6,6 @@ from django.core.exceptions import ValidationError
 from django.db.models.signals import post_save
 from django.dispatch          import receiver
 
-
 class UserManager(BaseUserManager):
     def create_user(self, email, full_name, password=None, **extra_fields):
         if not email:
@@ -84,6 +83,8 @@ class Department(models.Model):
     class Meta:
         verbose_name = 'Department'
         verbose_name_plural = 'Departments'
+
+
 class User(AbstractUser):
     """
     System user — Managers and Department Heads only.
@@ -113,6 +114,7 @@ class User(AbstractUser):
     USERNAME_FIELD  = 'email'
     REQUIRED_FIELDS = ['full_name']
     must_change_password = models.BooleanField(default=False)
+    
     def __str__(self):
         return f'{self.full_name} ({self.email})'
 
@@ -155,7 +157,11 @@ class Employee(models.Model):
     hired_at   = models.DateField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True , null=True)
     updated_at = models.DateTimeField(auto_now=True,null=True)
-
+    
+    # Import moved locally to avoid circular import with tasks app
+    from .managers import EmployeePerformanceManager
+    objects = EmployeePerformanceManager()
+    
     def set_password(self, raw_password):
         from django.contrib.auth.hashers import make_password
         self.password = make_password(raw_password)
@@ -223,6 +229,7 @@ class Profile(models.Model):
     class Meta:
         verbose_name        = 'Profile'
         verbose_name_plural = 'Profiles'
+
 
 @receiver(post_save, sender=User)
 def create_user_profile(sender, instance, created, **kwargs):

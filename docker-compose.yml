@@ -51,12 +51,19 @@ services:
     container_name: sync_web
     restart: unless-stopped
     env_file: .env
+    working_dir: /app/sync
+    # CRITICAL: Add /app to PYTHONPATH so 'apps' module is findable
+    environment:
+      - PYTHONPATH=/app:/app/sync
+      - DJANGO_SETTINGS_MODULE=core.settings
     command: >
-      sh -c 'python sync/manage.py migrate &&
-             python sync/manage.py runserver 0.0.0.0:8000 &&
+      sh -c 'python manage.py migrate &&
+             python manage.py collectstatic --noinput &&
              daphne -b 0.0.0.0 -p 8000 core.asgi:application'
     volumes:
       - .:/app
+      - static_volume:/app/sync/staticfiles
+      - media_volume:/app/sync/media
     ports:
       - '8000:8000'
     depends_on:
@@ -65,33 +72,9 @@ services:
       redis:
         condition: service_healthy
 
-  # ─── Celery Worker (enable later) ──────────────────
-  # celery_worker:
-  #   build: .
-  #   container_name: sync_celery_worker
-  #   restart: unless-stopped
-  #   env_file: .env
-  #   command: celery -A core worker --loglevel=info
-  #   volumes:
-  #     - .:/app
-  #   depends_on:
-  #     - db
-  #     - redis
-
-  # ─── Celery Beat Scheduler (enable later) ──────────
-  # celery_beat:
-  #   build: .
-  #   container_name: sync_celery_beat
-  #   restart: unless-stopped
-  #   env_file: .env
-  #   command: celery -A core beat --loglevel=info
-  #   volumes:
-  #     - .:/app
-  #   depends_on:
-  #     - db
-  #     - redis
-
 # ─── Named Volumes ──────────────────────────────────
 volumes:
   postgres_data:
   redis_data:
+  static_volume:
+  media_volume:

@@ -1,13 +1,17 @@
 # apps/tasks/views.py
-from rest_framework             import status, viewsets,mixins
+import os
+from rest_framework             import status, viewsets, mixins
 from rest_framework.decorators  import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response    import Response
 from rest_framework.parsers     import MultiPartParser, FormParser, JSONParser
+from rest_framework.exceptions  import ValidationError
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils      import extend_schema
 from django.shortcuts import get_object_or_404
-from apps.tasks.models         import MainTask, TaskAttachment , Request ,SubTask
+from django.core.cache import cache
+
+from apps.tasks.models         import MainTask, TaskAttachment, Request, SubTask
 from apps.tasks.serializers    import MainTaskSerializer, TaskAttachmentSerializer
 from apps.accounts.permissions import IsManager, IsDepartmentHead
 from apps.accounts.audit       import audit_action
@@ -19,8 +23,29 @@ from apps.tasks.serializers import (
     RequestResponseSerializer,
 )
 from apps.tasks.state_machine  import validate_transition, validate_subtask_transition
-from apps.accounts.permissions import IsManager, IsDepartmentHead
 from apps.accounts.models      import Employee
+from django.utils import timezone       
+from datetime     import timedelta, date
+from apps.tasks.selectors    import get_manager_dashboard, invalidate_dashboard_cache
+from apps.tasks.serializers  import ManagerDashboardSerializer
+
+
+# Security constants for file uploads
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+ALLOWED_EXTENSIONS = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.xlsx', '.xls', '.txt', '.zip']
+ALLOWED_MIME_TYPES = [
+    'application/pdf',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'image/jpeg',
+    'image/png',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'text/plain',
+    'application/zip',
+    'application/x-zip-compressed',
+]
+
 
 class MainTaskViewSet(viewsets.ModelViewSet):
     # Requirements 3 — select_related + prefetch_related
@@ -57,7 +82,9 @@ class MainTaskViewSet(viewsets.ModelViewSet):
     )
     @audit_action(action='create', resource='MainTask')
     def create(self, request, *args, **kwargs):
-        return super().create(request, *args, **kwargs)
+        response = super().create(request, *args, **kwargs)
+        invalidate_dashboard_cache()  # Clear cache on data change
+        return response
 
     def perform_create(self, serializer):
         # Requirement 4 — status auto-set to UNASSIGNED on creation
@@ -90,8 +117,9 @@ class MainTaskViewSet(viewsets.ModelViewSet):
     )
     @audit_action(action='update', resource='MainTask')
     def update(self, request, *args, **kwargs):
-        kwargs['partial'] = True
-        return super().update(request, *args, **kwargs)
+        response = super().update(request, *args, **kwargs)
+        invalidate_dashboard_cache()  # Clear cache on data change
+        return response
 
     @extend_schema(exclude=True)
     def partial_update(self, request, *args, **kwargs):
@@ -103,7 +131,9 @@ class MainTaskViewSet(viewsets.ModelViewSet):
     )
     @audit_action(action='delete', resource='MainTask')
     def destroy(self, request, *args, **kwargs):
-        return super().destroy(request, *args, **kwargs)
+        response = super().destroy(request, *args, **kwargs)
+        invalidate_dashboard_cache()  # Clear cache on data change
+        return response
 
     # ── Assign ────────────────────────────────────────────────
 
@@ -140,7 +170,8 @@ class MainTaskViewSet(viewsets.ModelViewSet):
             status=MainTask.Status.ASSIGNED,
             department=department_head.department,
         )
-
+        
+        invalidate_dashboard_cache()  # Clear cache
         task.refresh_from_db()
         return Response(
             MainTaskSerializer(task, context={'request': request}).data
@@ -193,6 +224,7 @@ class MainTaskViewSet(viewsets.ModelViewSet):
 
         task.status = new_status
         task.save(update_fields=['status', 'updated_at'])
+        invalidate_dashboard_cache()  # Clear cache on status change
 
         return Response(
             MainTaskSerializer(task, context={'request': request}).data
@@ -220,20 +252,53 @@ class MainTaskViewSet(viewsets.ModelViewSet):
                 {'detail': 'No files provided. Send files under the "files" key.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        
+        # SECURITY: Validate file count, size, and type
+        if len(files) > 10:
+            return Response(
+                {'detail': 'Maximum 10 files allowed per upload.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         created = []
-        for f in files:
-            attachment = TaskAttachment.objects.create(
-                task=task,
-                file=f,
-                uploaded_by=request.user,
-            )
-            created.append(attachment)
+        errors = []
 
-        return Response(
-            TaskAttachmentSerializer(created, many=True).data,
-            status=status.HTTP_201_CREATED,
-        )
+        for f in files:
+            # Validate file size
+            if f.size > MAX_FILE_SIZE:
+                errors.append(f"{f.name}: File size exceeds 10MB limit")
+                continue
+            
+            # Validate extension
+            ext = os.path.splitext(f.name)[1].lower()
+            if ext not in ALLOWED_EXTENSIONS:
+                errors.append(f"{f.name}: File type not allowed. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
+                continue
+            
+            # Validate MIME type (basic)
+            if f.content_type not in ALLOWED_MIME_TYPES:
+                errors.append(f"{f.name}: Invalid MIME type {f.content_type}")
+                continue
+            
+            try:
+                attachment = TaskAttachment.objects.create(
+                    task=task,
+                    file=f,
+                    uploaded_by=request.user,
+                )
+                created.append(attachment)
+            except Exception as e:
+                errors.append(f"{f.name}: Upload failed - {str(e)}")
+
+        response_data = {
+            'created': TaskAttachmentSerializer(created, many=True).data,
+            'count': len(created)
+        }
+        if errors:
+            response_data['errors'] = errors
+            
+        status_code = status.HTTP_201_CREATED if created else status.HTTP_400_BAD_REQUEST
+        return Response(response_data, status=status_code)
 
     @extend_schema(
         summary='Delete a specific attachment from a task',
@@ -293,6 +358,141 @@ class MainTaskViewSet(viewsets.ModelViewSet):
             MainTaskSerializer(tasks, many=True,
                                context={'request': request}).data
         )
+
+    # ── Reports / Stats ───────────────────────────────────────
+
+    @extend_schema(
+        summary='Aggregate task statistics for the reports dashboard',
+        tags=['Main Tasks'],
+    )
+    @action(
+        detail=False, methods=['get'], url_path='stats',
+        permission_classes=[IsAuthenticated],
+    )
+    def stats(self, request):
+        from django.utils import timezone
+        from django.db.models import Q
+        from datetime import timedelta, date
+
+        today = timezone.now().date()
+        active_statuses = ['unassigned', 'assigned', 'in_progress']
+
+        # ── KPIs ──────────────────────────────────────────────
+        total     = MainTask.objects.count()
+        completed = MainTask.objects.filter(status='completed').count()
+        success_rate = round((completed / total * 100) if total > 0 else 0, 1)
+
+        overdue_qs = MainTask.objects.filter(
+            due_date__lt=today,
+            status__in=active_statuses,
+        )
+        delay_days = [
+            (today - t.due_date).days
+            for t in overdue_qs
+            if t.due_date
+        ]
+        avg_delay = round(sum(delay_days) / len(delay_days), 1) if delay_days else 0.0
+
+        # ── Monthly completion trend (last 6 months) ──────────
+        monthly_trend = []
+        for i in range(5, -1, -1):
+            # compute month start by going back i months from today
+            m = today.month - i
+            y = today.year + (m - 1) // 12
+            m = ((m - 1) % 12) + 1
+            month_start = date(y, m, 1)
+            if m == 12:
+                month_end = date(y + 1, 1, 1)
+            else:
+                month_end = date(y, m + 1, 1)
+
+            count = MainTask.objects.filter(
+                status='completed',
+                updated_at__date__gte=month_start,
+                updated_at__date__lt=month_end,
+            ).count()
+            monthly_trend.append({
+                'month': month_start.strftime('%b'),
+                'completed': count,
+            })
+
+        # ── Critical tasks (due ≤ 7 days OR overdue, high/urgent) ──
+        critical_qs = MainTask.objects.filter(
+            Q(due_date__lte=today + timedelta(days=7)),
+            status__in=active_statuses,
+            priority__in=['high', 'urgent'],
+        ).order_by('due_date')[:5]
+
+        critical_tasks = []
+        for t in critical_qs:
+            days = (t.due_date - today).days if t.due_date else None
+            critical_tasks.append({
+                'id':           t.id,
+                'title':        t.title,
+                'priority':     t.priority,
+                'due_date':     t.due_date,
+                'days_until_due': days,
+                'is_overdue':   (t.due_date < today) if t.due_date else False,
+            })
+
+        # ── Active milestones (assigned/in_progress with dept) ──
+        milestones_qs = MainTask.objects.select_related(
+            'department', 'assigned_to',
+        ).prefetch_related('subtasks').filter(
+            status__in=['assigned', 'in_progress'],
+        ).order_by('due_date')[:6]
+
+        milestones = []
+        for t in milestones_qs:
+            sub_total    = t.subtasks.count()
+            sub_done     = t.subtasks.filter(status='completed').count()
+            progress     = round((sub_done / sub_total * 100) if sub_total > 0 else 0)
+
+            if t.due_date:
+                days_left = (t.due_date - today).days
+                if days_left < 0:
+                    task_status = 'delayed'
+                elif days_left <= 3:
+                    task_status = 'at-risk'
+                else:
+                    task_status = 'on-track'
+            else:
+                task_status = 'on-track'
+
+            milestones.append({
+                'id':        t.id,
+                'title':     t.title,
+                'dept':      t.department.name if t.department else 'Unassigned',
+                'due_date':  t.due_date.strftime('%b %d') if t.due_date else '—',
+                'progress':  progress,
+                'status':    task_status,
+            })
+
+        return Response({
+            'kpi': {
+                'total_tasks':     total,
+                'completed_tasks': completed,
+                'success_rate':    success_rate,
+                'avg_delay_days':  avg_delay,
+            },
+            'monthly_trend':  monthly_trend,
+            'critical_tasks': critical_tasks,
+            'milestones':     milestones,
+        })
+    
+    @extend_schema(
+        summary='Manager dashboard statistics',
+        tags=['Main Tasks'],
+    )
+    @action(
+        detail=False, methods=['get'], url_path='dashboard',
+        permission_classes=[IsAuthenticated, IsManager],
+    )
+    def dashboard(self, request):
+        data       = get_manager_dashboard()
+        serializer = ManagerDashboardSerializer(data)
+        return Response(serializer.data)
+
 
 class SubTaskViewSet(
     mixins.CreateModelMixin,
@@ -365,6 +565,8 @@ class SubTaskViewSet(
             created_by=request.user,
             status=SubTask.Status.NOT_STARTED,
         )
+        
+        invalidate_dashboard_cache()  # Clear cache
         return Response(
             SubTaskResponseSerializer(subtask).data,
             status=status.HTTP_201_CREATED,
@@ -403,6 +605,7 @@ class SubTaskViewSet(
         )
         serializer.is_valid(raise_exception=True)
         subtask = serializer.save()
+        invalidate_dashboard_cache()  # Clear cache
         return Response(SubTaskResponseSerializer(subtask).data)
 
     @extend_schema(exclude=True)
@@ -417,6 +620,7 @@ class SubTaskViewSet(
     def destroy(self, request, *args, **kwargs):
         subtask = self.get_object()
         subtask.delete()
+        invalidate_dashboard_cache()  # Clear cache
         return Response(
             {'detail': 'SubTask deleted successfully.'},
             status=status.HTTP_200_OK,
@@ -465,6 +669,7 @@ class SubTaskViewSet(
             )
 
         serializer.save(status=SubTask.Status.IN_PROGRESS)
+        invalidate_dashboard_cache()  # Clear cache
         subtask.refresh_from_db()
 
         return Response(SubTaskResponseSerializer(subtask).data)
@@ -528,6 +733,7 @@ class SubTaskViewSet(
         )
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        invalidate_dashboard_cache()  # Clear cache
 
         subtask.refresh_from_db()
         return Response(SubTaskResponseSerializer(subtask).data)
@@ -567,6 +773,32 @@ class SubTaskViewSet(
                 SubTaskResponseSerializer(page, many=True).data
             )
         return Response(SubTaskResponseSerializer(subtasks, many=True).data)
+    
+    @extend_schema(
+        summary='Employee personal dashboard statistics',
+        tags=['SubTasks'],
+    )
+    @action(
+        detail=False, methods=['get'], url_path='employee-dashboard',
+        permission_classes=[IsAuthenticated],
+    )
+    def employee_dashboard(self, request):
+        from apps.tasks.selectors   import get_employee_dashboard
+        from apps.tasks.serializers import EmployeeDashboardSerializer
+
+        token = request.auth
+        if not token or token.get('type') != 'employee':
+            return Response(
+                {'detail': 'This endpoint is for employees only.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        data       = get_employee_dashboard(employee_id=token.get('employee_id'))
+        serializer = EmployeeDashboardSerializer(data)
+        return Response(serializer.data)
+
+
+
 
 class RequestViewSet(
     mixins.CreateModelMixin,
@@ -724,6 +956,8 @@ class RequestViewSet(
             reviewed_by=request.user,
             reviewed_at=timezone.now(),
         )
+        
+        invalidate_dashboard_cache()  # Clear cache as task data changed
 
         req.refresh_from_db()
         return Response(RequestResponseSerializer(req).data)

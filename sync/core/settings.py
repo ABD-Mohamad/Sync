@@ -99,6 +99,11 @@ CACHES = {
         'TIMEOUT': 300,
     }
 }
+
+# Cache TTL configurations (seconds)
+CACHE_TTL_DASHBOARD = 300  # 5 minutes for manager dashboard
+CACHE_TTL_EMPLOYEE_DASHBOARD = 60  # 1 minute for employee dashboard (more volatile)
+CACHE_TTL_DEFAULT = 600    # 10 minutes default
  
 # ─── Celery Configuration ─────────────────────────────────
 CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://redis:6379/1')
@@ -115,6 +120,7 @@ AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
     {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
     {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
+    {'NAME': 'apps.accounts.validators.StrongPasswordValidator'},
 ]
  
 # ─── DRF & JWT ────────────────────────────────────────────
@@ -171,6 +177,22 @@ COOKIE_SAMESITE  = config('COOKIE_SAMESITE', default='Lax')
 CSRF_TRUSTED_ORIGINS = ['http://localhost:4200']
 CSRF_COOKIE_HTTPONLY = False    # Angular must be able to read the CSRF cookie
 CSRF_COOKIE_SAMESITE = 'Lax'
+
+# ─── File Upload & Security ─────────────────────────────────
+# Maximum upload size (10MB per file)
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB
+MAX_UPLOAD_SIZE = 10485760  # 10MB
+
+# Security Headers
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_BROWSER_XSS_FILTER = True
+X_FRAME_OPTIONS = 'DENY'
+# SECURE_SSL_REDIRECT = True  # Enable in production behind HTTPS
+# SECURE_HSTS_SECONDS = 31536000  # Enable in production (1 year)
+# SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+# SECURE_HSTS_PRELOAD = True
+ 
 # ─── Internationalization ─────────────────────────────────
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'Asia/Riyadh'    # ← adjust to your timezone
@@ -250,12 +272,3 @@ CHANNEL_LAYERS = {
         },
     },
 }
-
-AUTH_PASSWORD_VALIDATORS = [
-    {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
-    },
-    {
-        'NAME': 'apps.accounts.validators.StrongPasswordValidator',
-    },
-]

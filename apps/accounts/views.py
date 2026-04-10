@@ -2,6 +2,7 @@
 from django.contrib.auth         import authenticate
 from django.contrib.auth.hashers import make_password
 from django.utils                import timezone
+from django.db                   import transaction
 from rest_framework              import status, mixins, viewsets
 from rest_framework.decorators   import action
 from rest_framework.permissions  import IsAuthenticated, AllowAny
@@ -10,7 +11,7 @@ from rest_framework_simplejwt.tokens     import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from drf_spectacular.utils       import extend_schema, OpenApiResponse
 
-from apps.accounts.models      import User, Employee, Department,Profile
+from apps.accounts.models      import User, Employee, Department, Profile
 from apps.accounts.serializers import (
     UserCreateSerializer, UserResponseSerializer,
     EmployeeCreateSerializer, EmployeeResponseSerializer,
@@ -30,7 +31,8 @@ from apps.accounts.utils import (
 from apps.accounts.audit import audit_action, AuditLog, get_client_ip
 from apps.accounts.cookies import set_auth_cookies
 
-class UserViewSet(
+
+class BaseAccountViewSet(
     mixins.CreateModelMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
@@ -38,13 +40,105 @@ class UserViewSet(
     mixins.DestroyModelMixin,
     viewsets.GenericViewSet,
 ):
-    queryset           = User.objects.select_related('role', 'department').all()
-    permission_classes = [IsITOrAdmin]
+    """
+    Base ViewSet providing atomic bulk operations and standardized 
+    account creation workflows with secure password generation.
+    """
+    create_serializer_class   = None
+    response_serializer_class = None
+    welcome_email_func        = None
 
     def get_serializer_class(self):
-        if self.action in ['create', 'update', 'partial_update']:
-            return UserCreateSerializer
-        return UserResponseSerializer
+        if self.action in ['create', 'update', 'partial_update', 'bulk_create']:
+            return self.create_serializer_class
+        return self.response_serializer_class
+
+    def update(self, request, *args, **kwargs):
+        instance   = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        obj = serializer.save()
+        return Response(self.response_serializer_class(obj).data)
+
+    @extend_schema(exclude=True)
+    def partial_update(self, request, *args, **kwargs):
+        return self.update(request, *args, **kwargs)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        temp_password = generate_temp_password()
+        
+        obj = serializer.save(must_change_password=True)
+        obj.set_password(temp_password)
+        obj.save()
+
+        if self.welcome_email_func:
+            self.welcome_email_func(obj, temp_password)
+
+        return Response(
+            self.response_serializer_class(obj).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=False, methods=['post'], url_path='bulk-create')
+    @transaction.atomic  # CRITICAL: Ensures all-or-nothing creation
+    def bulk_create(self, request):
+        if not isinstance(request.data, list):
+            return Response(
+                {'detail': 'Expected a list of accounts.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not (2 <= len(request.data) <= 50):
+            return Response(
+                {'detail': 'Bulk create requires between 2 and 50 accounts.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = self.get_serializer(data=request.data, many=True)
+        serializer.is_valid(raise_exception=True)
+
+        created = []
+        failed  = []
+
+        model_class = self.queryset.model
+
+        for item_data in serializer.validated_data:
+            try:
+                # Use atomic block for each individual creation to isolate failures
+                with transaction.atomic():
+                    temp_password = generate_temp_password()
+                    obj = model_class(**item_data)
+                    obj.must_change_password = True
+                    obj.set_password(temp_password)
+                    obj.save()
+                    
+                    if self.welcome_email_func:
+                        self.welcome_email_func(obj, temp_password)
+                    created.append(obj)
+            except Exception as e:
+                failed.append({'email': item_data.get('email'), 'reason': str(e)})
+
+        response_data = {
+            'created': self.response_serializer_class(created, many=True).data,
+            'count'  : len(created),
+        }
+        if failed:
+            response_data['failed'] = failed
+
+        return Response(response_data, status=status.HTTP_201_CREATED)
+
+
+class UserViewSet(BaseAccountViewSet):
+    queryset                  = User.objects.select_related('role', 'department').all()
+    permission_classes        = [IsITOrAdmin]
+    create_serializer_class   = UserCreateSerializer
+    response_serializer_class = UserResponseSerializer
+    
+    @staticmethod
+    def welcome_email_func(user, password):
+        send_user_welcome_email(user, password)
 
     @extend_schema(
         request=UserCreateSerializer,
@@ -54,20 +148,7 @@ class UserViewSet(
     )
     @audit_action(action='create', resource='User')
     def create(self, request, *args, **kwargs):
-        serializer = UserCreateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        temp_password = generate_temp_password()
-        user = serializer.save(must_change_password=True)
-        user.set_password(temp_password)
-        user.save()
-
-        send_user_welcome_email(user, temp_password)
-
-        return Response(
-            UserResponseSerializer(user).data,
-            status=status.HTTP_201_CREATED,
-        )
+        return super().create(request, *args, **kwargs)
 
     @extend_schema(
         responses={200: UserResponseSerializer(many=True)},
@@ -93,15 +174,7 @@ class UserViewSet(
     )
     @audit_action(action='update', resource='User')
     def update(self, request, *args, **kwargs):
-        instance   = self.get_object()
-        serializer = UserCreateSerializer(instance, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        user = serializer.save()
-        return Response(UserResponseSerializer(user).data)
-
-    @extend_schema(exclude=True)
-    def partial_update(self, request, *args, **kwargs):
-        return self.update(request, *args, **kwargs)
+        return super().update(request, *args, **kwargs)
 
     @extend_schema(
         summary='Deactivate a system user',
@@ -116,78 +189,31 @@ class UserViewSet(
             {'detail': 'User deactivated successfully.'},
             status=status.HTTP_200_OK,
         )
+
     @extend_schema(
         request=UserCreateSerializer(many=True),
         responses={201: UserResponseSerializer(many=True)},
         summary='Bulk create system users',
         tags=['User Management'],
     )
-    @action(detail=False, methods=['post'], url_path='bulk-create')
     def bulk_create(self, request):
-        if not isinstance(request.data, list):
-            return Response(
-                {'detail': 'Expected a list of users.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if not (2 <= len(request.data) <= 50):
-            return Response(
-                {'detail': 'Bulk create requires between 2 and 50 users.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        serializer = UserCreateSerializer(data=request.data, many=True)
-        serializer.is_valid(raise_exception=True)
-
-        created = []
-        failed  = []
-
-        for user_data in serializer.validated_data:
-            try:
-                temp_password = generate_temp_password()
-                user = User(
-                    full_name            = user_data['full_name'],
-                    email                = user_data['email'],
-                    role                 = user_data.get('role'),
-                    department           = user_data.get('department'),
-                    must_change_password = True,
-                )
-                user.set_password(temp_password)
-                user.save()
-                send_user_welcome_email(user, temp_password)
-                created.append(user)
-            except Exception as e:
-                failed.append({'email': user_data.get('email'), 'reason': str(e)})
-
-        response_data = {
-            'created': UserResponseSerializer(created, many=True).data,
-            'count'  : len(created),
-        }
-        if failed:
-            response_data['failed'] = failed
-
-        return Response(response_data, status=status.HTTP_201_CREATED)
+        return super().bulk_create(request)
 
 
-
-class EmployeeViewSet(
-    mixins.CreateModelMixin,
-    mixins.ListModelMixin,
-    mixins.RetrieveModelMixin,
-    mixins.UpdateModelMixin,
-    mixins.DestroyModelMixin,
-    viewsets.GenericViewSet,
-):
-    queryset           = Employee.objects.select_related('department').all()
-    permission_classes = [IsITOrAdmin]
-    filterset_fields   = ['department', 'status']
-    search_fields      = ['full_name', 'email', 'phone']
-    ordering_fields    = ['full_name', 'hired_at', 'created_at']
-    ordering           = ['full_name']
-
-    def get_serializer_class(self):
-        if self.action in ['create', 'update', 'partial_update']:
-            return EmployeeCreateSerializer
-        return EmployeeResponseSerializer
+class EmployeeViewSet(BaseAccountViewSet):
+    queryset                  = Employee.objects.select_related('department').all()
+    permission_classes        = [IsITOrAdmin]
+    filterset_fields          = ['department', 'status']
+    search_fields             = ['full_name', 'email', 'phone']
+    ordering_fields           = ['full_name', 'hired_at', 'created_at']
+    ordering                  = ['full_name']
+    
+    create_serializer_class   = EmployeeCreateSerializer
+    response_serializer_class = EmployeeResponseSerializer
+    
+    @staticmethod
+    def welcome_email_func(employee, password):
+        send_employee_welcome_email(employee, password)
 
     @extend_schema(
         request=EmployeeCreateSerializer,
@@ -197,14 +223,19 @@ class EmployeeViewSet(
     )
     @audit_action(action='create', resource='Employee')
     def create(self, request, *args, **kwargs):
+        """
+        FIXED: Uses set_password() method consistently instead of manual 
+        make_password hashing to ensure password algorithm consistency.
+        """
         serializer = EmployeeCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         temp_password = generate_temp_password()
-        employee = serializer.save(
-            password=make_password(temp_password),
-            must_change_password=True,
-        )
+        
+        # FIXED: Use save() then set_password() for consistency with User model
+        employee = serializer.save(must_change_password=True)
+        employee.set_password(temp_password)
+        employee.save()
 
         send_employee_welcome_email(employee, temp_password)
 
@@ -237,15 +268,7 @@ class EmployeeViewSet(
     )
     @audit_action(action='update', resource='Employee')
     def update(self, request, *args, **kwargs):
-        instance   = self.get_object()
-        serializer = EmployeeCreateSerializer(instance, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        employee = serializer.save()
-        return Response(EmployeeResponseSerializer(employee).data)
-
-    @extend_schema(exclude=True)
-    def partial_update(self, request, *args, **kwargs):
-        return self.update(request, *args, **kwargs)
+        return super().update(request, *args, **kwargs)
 
     @extend_schema(
         summary='Deactivate an employee',
@@ -260,58 +283,34 @@ class EmployeeViewSet(
             {'detail': 'Employee deactivated successfully.'},
             status=status.HTTP_200_OK,
         )
+
     @extend_schema(
-    request=EmployeeCreateSerializer(many=True),
-    responses={201: EmployeeResponseSerializer(many=True)},
-    summary='Bulk create employees',
-    tags=['Employee Management'],
-)
-    @action(detail=False, methods=['post'], url_path='bulk-create')
+        request=EmployeeCreateSerializer(many=True),
+        responses={201: EmployeeResponseSerializer(many=True)},
+        summary='Bulk create employees',
+        tags=['Employee Management'],
+    )
     def bulk_create(self, request):
-        if not isinstance(request.data, list):
-            return Response(
-                {'detail': 'Expected a list of employees.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if not (2 <= len(request.data) <= 50):
-            return Response(
-                {'detail': 'Bulk create requires between 2 and 50 employees.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        return super().bulk_create(request)
 
-        serializer = EmployeeCreateSerializer(data=request.data, many=True)
-        serializer.is_valid(raise_exception=True)
+    @extend_schema(
+        summary='Employee directory with performance stats',
+        tags=['Employee Management'],
+    )
+    @action(
+        detail=False, methods=['get'], url_path='performance',
+        permission_classes=[IsITOrAdmin],
+    )
+    def performance(self, request):
+        from apps.tasks.selectors   import get_employee_performance
+        from apps.tasks.serializers import EmployeeDirectorySerializer
 
-        created = []
-        failed  = []
+        data       = get_employee_performance()
+        serializer = EmployeeDirectorySerializer(data)
+        return Response(serializer.data)    
 
-        for employee_data in serializer.validated_data:
-            try:
-                temp_password = generate_temp_password()
-                employee = Employee(
-                    full_name            = employee_data['full_name'],
-                    email                = employee_data['email'],
-                    phone                = employee_data.get('phone', ''),
-                    department           = employee_data.get('department'),
-                    hired_at             = employee_data.get('hired_at'),
-                    must_change_password = True,
-                )
-                employee.set_password(temp_password)
-                employee.save()
-                send_employee_welcome_email(employee, temp_password)
-                created.append(employee)
-            except Exception as e:
-                failed.append({'email': employee_data.get('email'), 'reason': str(e)})
 
-        response_data = {
-            'created': EmployeeResponseSerializer(created, many=True).data,
-            'count'  : len(created),
-        }
-        if failed:
-            response_data['failed'] = failed
 
-        return Response(response_data, status=status.HTTP_201_CREATED)
-        
 class AuthViewSet(viewsets.GenericViewSet):
     permission_classes = [AllowAny]
 
@@ -326,8 +325,6 @@ class AuthViewSet(viewsets.GenericViewSet):
         throttle_classes=[LoginRateThrottle],
     )
     def login(self, request):
-        
-
         serializer = UnifiedLoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -562,6 +559,7 @@ class AuthViewSet(viewsets.GenericViewSet):
         )
         return clear_auth_cookies(response)
 
+
 class DepartmentViewSet(
     mixins.CreateModelMixin,
     mixins.ListModelMixin,
@@ -613,6 +611,8 @@ class DepartmentViewSet(
                 {"detail": "Cannot delete this department because it still has employees or tasks assigned to it."},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+
 class ProfileViewSet(viewsets.GenericViewSet):
     """
     GET  /api/accounts/profile/   — retrieve current user's profile
