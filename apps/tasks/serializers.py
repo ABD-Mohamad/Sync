@@ -446,3 +446,25 @@ class EmployeePerformanceSerializer(serializers.Serializer):
 class EmployeeDirectorySerializer(serializers.Serializer):
     summary   = PerformanceSummarySerializer()
     employees = EmployeePerformanceSerializer(many=True)
+
+
+class WarningListSerializer(serializers.Serializer):
+    
+    id = serializers.IntegerField()
+    full_name = serializers.CharField()
+    email = serializers.EmailField()
+    dept_name = serializers.CharField(allow_null=True)
+    delay_rate = serializers.FloatField()
+    completion_rate = serializers.FloatField()
+    performance_score = serializers.FloatField()
+    performance_label = serializers.CharField()
+    last_activity = serializers.DateTimeField(allow_null=True, required=False)
+
+
+class DepartmentWorkloadSerializer(serializers.Serializer):
+
+    id = serializers.IntegerField()
+    full_name = serializers.CharField()
+    email = serializers.EmailField()
+    active_subtasks_count = serializers.IntegerField()
+    overdue_subtasks_count = serializers.IntegerField(required=False)

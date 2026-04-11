@@ -4,76 +4,46 @@ from django.dispatch          import receiver
 from apps.tasks.models        import MainTask, SubTask
 
 
+# ✅ Use update_fields to guard — or track dirty fields
 @receiver(post_save, sender=MainTask)
-def main_task_notifications(sender, instance, created, **kwargs):
+def main_task_notifications(sender, instance, created, update_fields=None, **kwargs):
     from apps.notifications.utils import send_notification
 
-    # ── Task Created ──────────────────────────────────────────
     if created:
-        # Notify the creator (confirmation)
-        send_notification(
-            recipient   = instance.created_by,
-            actor       = instance.created_by,
-            verb        = f'You created task "{instance.title}"',
-            target_id   = instance.id,
-            target_type = 'MainTask',
-        )
+        send_notification(recipient=instance.created_by, ...)
         return
 
-    # ── Task Assigned ─────────────────────────────────────────
-    if instance.assigned_to and instance.status == MainTask.Status.ASSIGNED:
-        send_notification(
-            recipient   = instance.assigned_to,
-            actor       = instance.created_by,
-            verb        = f'You have been assigned task "{instance.title}"',
-            target_id   = instance.id,
-            target_type = 'MainTask',
-        )
+    # Only notify assignment if status field was explicitly updated to ASSIGNED
+    if (update_fields and 'status' in update_fields
+            and instance.assigned_to
+            and instance.status == MainTask.Status.ASSIGNED):
+        send_notification(recipient=instance.assigned_to, ...)
 
-    # ── Status Updated ────────────────────────────────────────
-    if not created and instance.assigned_to:
-        status_labels = {
-            MainTask.Status.IN_PROGRESS: 'is now In Progress',
-            MainTask.Status.COMPLETED  : 'has been Completed',
-        }
+    # Only notify status change if status field changed
+    if update_fields and 'status' in update_fields and instance.assigned_to:
+        status_labels = { ... }
         label = status_labels.get(instance.status)
         if label:
-            send_notification(
-                recipient   = instance.created_by,
-                actor       = instance.assigned_to,
-                verb        = f'Task "{instance.title}" {label}',
-                target_id   = instance.id,
-                target_type = 'MainTask',
-            )
+            send_notification(recipient=instance.created_by, ...)
 
-
+            
 @receiver(post_save, sender=SubTask)
 def subtask_notifications(sender, instance, created, **kwargs):
     from apps.notifications.utils import send_notification
 
-    # ── SubTask Created ───────────────────────────────────────
-    if created and instance.assigned_to:
-        send_notification(
-            recipient   = instance.assigned_to,
-            actor       = instance.created_by,
-            verb        = f'You have been assigned subtask "{instance.title}"',
-            target_id   = instance.id,
-            target_type = 'SubTask',
-        )
-        return
+    # SubTask assigned_to is an Employee — they get mobile push, not WebSocket.
+    # Notify the main task's creator (a web User) about status changes.
 
-    # ── SubTask Status Updated ────────────────────────────────
-    if not created and instance.assigned_to:
+    if not created and instance.main_task.created_by:
         status_labels = {
             SubTask.Status.AWAITING_REVIEW: 'is awaiting your review',
             SubTask.Status.COMPLETED      : 'has been completed',
         }
         label = status_labels.get(instance.status)
         if label:
-            # Notify the main task's creator (the manager)
             send_notification(
-                recipient   = instance.main_task.created_by,
-                actor       = instance.assigned_to,
+                recipient   = instance.main_task.created_by,   # ← always a User ✅
+                actor       = None,                             # Employee has no User
                 verb        = f'SubTask "{instance.title}" {label}',
                 target_id   = instance.id,
                 target_type = 'SubTask',

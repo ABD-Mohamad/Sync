@@ -30,7 +30,8 @@ from apps.accounts.utils import (
 )
 from apps.accounts.audit import audit_action, AuditLog, get_client_ip
 from apps.accounts.cookies import set_auth_cookies
-
+from django.utils import timezone
+from apps.tasks.selectors import get_employee_performance
 
 class BaseAccountViewSet(
     mixins.CreateModelMixin,
@@ -308,8 +309,66 @@ class EmployeeViewSet(BaseAccountViewSet):
         data       = get_employee_performance()
         serializer = EmployeeDirectorySerializer(data)
         return Response(serializer.data)    
+    @extend_schema(
+        responses={200: WarningListSerializer(many=True)},
+        summary='Warning List - Employees with delay rate > 30% (FR-MAN-07)',
+        tags=['Employee Management'],
+    )
+    @action(
+        detail=False, 
+        methods=['get'], 
+        url_path='warnings',
+        permission_classes=[IsITOrAdmin] 
+    )
+    def warnings(self, request):
+        """
+        Returns employees with delay_rate > 30% for manager oversight.
+        Uses the existing performance stats selector.
+        """
+        
+        
+        data = get_employee_performance(today=timezone.now().date())
+        
+        # Filter the already-calculated warning list
+        warning_employees = [
+            emp for emp in data.get('employees', []) 
+            if emp.get('delay_rate', 0) > 30
+        ]
+        
+        # Add last_activity from middleware if available
+        # This assumes you have middleware tracking, otherwise remove
+        for emp in warning_employees:
+            emp['last_activity'] = self._get_last_activity(emp['id'])
+        
+        return Response(warning_employees)
 
-
+    def _get_last_activity(self, employee_id):
+        # Helper to get last seen from cache/session if tracked
+        # Remove if not implementing activity tracking
+        from django.core.cache import cache
+        return cache.get(f'last_activity:employee:{employee_id}')
+    @extend_schema(
+        responses={200: DepartmentWorkloadSerializer(many=True)},
+        summary='DH Workload Distribution (FR-DH-06)',
+        tags=['Employee Management'],
+    )
+    @action(
+        detail=False,
+        methods=['get'],
+        url_path='workload',
+        permission_classes=[IsDepartmentHead]
+    )
+    def workload(self, request):
+        from apps.tasks.selectors import get_department_workload
+        
+        if not request.user.department:
+            return Response(
+                {'detail': 'User has no department assigned.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+        data = get_department_workload(request.user)
+        return Response(data)
 
 class AuthViewSet(viewsets.GenericViewSet):
     permission_classes = [AllowAny]

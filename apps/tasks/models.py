@@ -125,7 +125,8 @@ class SubTask(models.Model):
         related_name='created_subtasks',
     )
     assigned_to = models.ForeignKey(
-        User, on_delete=models.SET_NULL,
+        'accounts.Employee',
+        on_delete=models.SET_NULL,
         null=True, blank=True,
         related_name='assigned_subtasks',
     )

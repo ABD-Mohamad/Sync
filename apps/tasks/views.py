@@ -1,39 +1,48 @@
 # apps/tasks/views.py
 import os
-from rest_framework             import status, viewsets, mixins
-from rest_framework.decorators  import action
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response    import Response
-from rest_framework.parsers     import MultiPartParser, FormParser, JSONParser
-from rest_framework.exceptions  import ValidationError
-from django_filters.rest_framework import DjangoFilterBackend
-from drf_spectacular.utils      import extend_schema
-from django.shortcuts import get_object_or_404
-from django.core.cache import cache
+from datetime import timedelta, date
 
-from apps.tasks.models         import MainTask, TaskAttachment, Request, SubTask
-from apps.tasks.serializers    import MainTaskSerializer, TaskAttachmentSerializer
-from apps.accounts.permissions import IsManager, IsDepartmentHead
+from django.core.cache             import cache
+from django.db.models              import Avg, Count, F, Q, Value
+from django.db.models.functions    import TruncMonth
+from django.shortcuts              import get_object_or_404
+from django.utils                  import timezone
+
+from django_filters.rest_framework import DjangoFilterBackend
+from drf_spectacular.utils         import extend_schema
+from rest_framework                import status, viewsets, mixins
+from rest_framework.decorators     import action
+from rest_framework.parsers        import MultiPartParser, FormParser, JSONParser
+from rest_framework.permissions    import IsAuthenticated
+from rest_framework.response       import Response
+
 from apps.accounts.audit       import audit_action
-from apps.tasks.serializers import (
-    MainTaskSerializer, TaskAttachmentSerializer,
-    SubTaskCreateSerializer, SubTaskAssignSerializer,
-    SubTaskStatusSerializer, SubTaskResponseSerializer,
-    RequestCreateSerializer, RequestReviewSerializer,
+from apps.accounts.models      import Employee
+from apps.accounts.permissions import IsManager, IsDepartmentHead
+from apps.tasks.models         import MainTask, TaskAttachment, SubTask, Request
+from apps.tasks.selectors      import get_manager_dashboard, invalidate_dashboard_cache
+from apps.tasks.serializers    import (
+    MainTaskSerializer,
+    TaskAttachmentSerializer,
+    SubTaskCreateSerializer,
+    SubTaskAssignSerializer,
+    SubTaskStatusSerializer,
+    SubTaskResponseSerializer,
+    RequestCreateSerializer,
+    RequestReviewSerializer,
     RequestResponseSerializer,
+    ManagerDashboardSerializer,
+    EmployeeDashboardSerializer,
+    DepartmentWorkloadSerializer,   # FIX #11 — was missing
 )
 from apps.tasks.state_machine  import validate_transition, validate_subtask_transition
-from apps.accounts.models      import Employee
-from django.utils import timezone       
-from datetime     import timedelta, date
-from apps.tasks.selectors    import get_manager_dashboard, invalidate_dashboard_cache
-from apps.tasks.serializers  import ManagerDashboardSerializer
 
 
-# Security constants for file uploads
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-ALLOWED_EXTENSIONS = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.xlsx', '.xls', '.txt', '.zip']
-ALLOWED_MIME_TYPES = [
+# ── File-upload security constants ───────────────────────────────────────────
+MAX_FILE_SIZE       = 10 * 1024 * 1024   # 10 MB
+ALLOWED_EXTENSIONS  = {'.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png',
+                       '.xlsx', '.xls', '.txt', '.zip'}
+ALLOWED_MIME_TYPES  = {
     'application/pdf',
     'application/msword',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -44,36 +53,39 @@ ALLOWED_MIME_TYPES = [
     'text/plain',
     'application/zip',
     'application/x-zip-compressed',
-]
+}
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MainTaskViewSet
+# ─────────────────────────────────────────────────────────────────────────────
 
 class MainTaskViewSet(viewsets.ModelViewSet):
-    # Requirements 3 — select_related + prefetch_related
     queryset = MainTask.objects.select_related(
         'created_by',
         'assigned_to',
         'assigned_to__department',
         'department',
     ).prefetch_related(
-        'attachments',               # avoids N+1 on file listing
+        'attachments',
         'attachments__uploaded_by',
     ).all()
 
     serializer_class = MainTaskSerializer
     filter_backends  = [DjangoFilterBackend]
     filterset_fields = ['status', 'priority']
-
-    # Accept multipart for file uploads
-    parser_classes = [MultiPartParser, FormParser, JSONParser]
+    parser_classes   = [MultiPartParser, FormParser, JSONParser]
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve', 'my_tasks']:
+        if self.action in ['list', 'retrieve', 'my_tasks', 'stats']:
             return [IsAuthenticated()]
         if self.action == 'update_status':
             return [IsAuthenticated()]   # object-level check inside the action
+        if self.action == 'dashboard':
+            return [IsAuthenticated(), IsManager()]
         return [IsAuthenticated(), IsManager()]
 
-    # ── CRUD ──────────────────────────────────────────────────
+    # ── CRUD ─────────────────────────────────────────────────────────────────
 
     @extend_schema(
         responses={201: MainTaskSerializer},
@@ -82,15 +94,18 @@ class MainTaskViewSet(viewsets.ModelViewSet):
     )
     @audit_action(action='create', resource='MainTask')
     def create(self, request, *args, **kwargs):
-        response = super().create(request, *args, **kwargs)
-        invalidate_dashboard_cache()  # Clear cache on data change
-        return response
-
-    def perform_create(self, serializer):
-        # Requirement 4 — status auto-set to UNASSIGNED on creation
-        serializer.save(
-            created_by=self.request.user,
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        task = serializer.save(
+            created_by=request.user,
             status=MainTask.Status.UNASSIGNED,
+        )
+        invalidate_dashboard_cache()
+        headers = self.get_success_headers(serializer.data)
+        return Response(
+            MainTaskSerializer(task, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+            headers=headers,
         )
 
     @extend_schema(
@@ -118,7 +133,7 @@ class MainTaskViewSet(viewsets.ModelViewSet):
     @audit_action(action='update', resource='MainTask')
     def update(self, request, *args, **kwargs):
         response = super().update(request, *args, **kwargs)
-        invalidate_dashboard_cache()  # Clear cache on data change
+        invalidate_dashboard_cache()
         return response
 
     @extend_schema(exclude=True)
@@ -132,10 +147,10 @@ class MainTaskViewSet(viewsets.ModelViewSet):
     @audit_action(action='delete', resource='MainTask')
     def destroy(self, request, *args, **kwargs):
         response = super().destroy(request, *args, **kwargs)
-        invalidate_dashboard_cache()  # Clear cache on data change
+        invalidate_dashboard_cache()
         return response
 
-    # ── Assign ────────────────────────────────────────────────
+    # ── Assign ───────────────────────────────────────────────────────────────
 
     @extend_schema(
         request=MainTaskSerializer,
@@ -165,19 +180,15 @@ class MainTaskViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Requirement 4 — auto-set department + status → ASSIGNED
         serializer.save(
             status=MainTask.Status.ASSIGNED,
             department=department_head.department,
         )
-        
-        invalidate_dashboard_cache()  # Clear cache
+        invalidate_dashboard_cache()
         task.refresh_from_db()
-        return Response(
-            MainTaskSerializer(task, context={'request': request}).data
-        )
+        return Response(MainTaskSerializer(task, context={'request': request}).data)
 
-    # ── Status Update with State Machine ─────────────────────
+    # ── Status Update ─────────────────────────────────────────────────────────
 
     @extend_schema(
         summary='Update task status — enforces state machine rules',
@@ -196,7 +207,6 @@ class MainTaskViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Department Head can only update tasks assigned to them
         if (user.role and user.role.name == 'department_head'
                 and task.assigned_to != user):
             return Response(
@@ -204,33 +214,22 @@ class MainTaskViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        is_manager = (
-            user.is_superuser or
-            (user.role and user.role.name == 'it')
-        )
+        is_manager = user.is_superuser or (user.role and user.role.name == 'it')
 
-        # Requirement 1 — validate transition via state machine
         valid, error = validate_transition(
             current_status=task.status,
             new_status=new_status,
             is_manager=is_manager,
         )
-
         if not valid:
-            return Response(
-                {'detail': error},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return Response({'detail': error}, status=status.HTTP_400_BAD_REQUEST)
 
         task.status = new_status
         task.save(update_fields=['status', 'updated_at'])
-        invalidate_dashboard_cache()  # Clear cache on status change
+        invalidate_dashboard_cache()
+        return Response(MainTaskSerializer(task, context={'request': request}).data)
 
-        return Response(
-            MainTaskSerializer(task, context={'request': request}).data
-        )
-
-    # ── Attachments ───────────────────────────────────────────
+    # ── Attachments ───────────────────────────────────────────────────────────
 
     @extend_schema(
         request=TaskAttachmentSerializer,
@@ -252,8 +251,6 @@ class MainTaskViewSet(viewsets.ModelViewSet):
                 {'detail': 'No files provided. Send files under the "files" key.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        
-        # SECURITY: Validate file count, size, and type
         if len(files) > 10:
             return Response(
                 {'detail': 'Maximum 10 files allowed per upload.'},
@@ -261,44 +258,44 @@ class MainTaskViewSet(viewsets.ModelViewSet):
             )
 
         created = []
-        errors = []
+        errors  = []
 
         for f in files:
-            # Validate file size
             if f.size > MAX_FILE_SIZE:
-                errors.append(f"{f.name}: File size exceeds 10MB limit")
+                errors.append(f'{f.name}: File size exceeds 10 MB limit.')
                 continue
-            
-            # Validate extension
+
             ext = os.path.splitext(f.name)[1].lower()
             if ext not in ALLOWED_EXTENSIONS:
-                errors.append(f"{f.name}: File type not allowed. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
+                errors.append(
+                    f'{f.name}: File type not allowed. '
+                    f'Allowed: {", ".join(sorted(ALLOWED_EXTENSIONS))}'
+                )
                 continue
-            
-            # Validate MIME type (basic)
+
             if f.content_type not in ALLOWED_MIME_TYPES:
-                errors.append(f"{f.name}: Invalid MIME type {f.content_type}")
+                errors.append(f'{f.name}: Invalid MIME type {f.content_type}.')
                 continue
-            
+
             try:
                 attachment = TaskAttachment.objects.create(
-                    task=task,
-                    file=f,
-                    uploaded_by=request.user,
+                    task=task, file=f, uploaded_by=request.user,
                 )
                 created.append(attachment)
             except Exception as e:
-                errors.append(f"{f.name}: Upload failed - {str(e)}")
+                errors.append(f'{f.name}: Upload failed — {e}')
 
         response_data = {
             'created': TaskAttachmentSerializer(created, many=True).data,
-            'count': len(created)
+            'count'  : len(created),
         }
         if errors:
             response_data['errors'] = errors
-            
-        status_code = status.HTTP_201_CREATED if created else status.HTTP_400_BAD_REQUEST
-        return Response(response_data, status=status_code)
+
+        return Response(
+            response_data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_400_BAD_REQUEST,
+        )
 
     @extend_schema(
         summary='Delete a specific attachment from a task',
@@ -312,38 +309,28 @@ class MainTaskViewSet(viewsets.ModelViewSet):
     def delete_attachment(self, request, pk=None, attachment_id=None):
         task = self.get_object()
         try:
-            attachment = TaskAttachment.objects.get(
-                id=attachment_id, task=task
-            )
+            attachment = TaskAttachment.objects.get(id=attachment_id, task=task)
         except TaskAttachment.DoesNotExist:
             return Response(
                 {'detail': 'Attachment not found.'},
                 status=status.HTTP_404_NOT_FOUND,
             )
-
-        attachment.file.delete(save=False)  # delete from storage
+        attachment.file.delete(save=False)
         attachment.delete()
+        return Response({'detail': 'Attachment deleted.'}, status=status.HTTP_200_OK)
 
-        return Response(
-            {'detail': 'Attachment deleted.'},
-            status=status.HTTP_200_OK,
-        )
-
-    # ── My Tasks ──────────────────────────────────────────────
+    # ── My Tasks ──────────────────────────────────────────────────────────────
 
     @extend_schema(
         responses={200: MainTaskSerializer(many=True)},
         summary='Get tasks assigned to me',
         tags=['Main Tasks'],
     )
-    @action(
-        detail=False, methods=['get'], url_path='my-tasks',
-        permission_classes=[IsAuthenticated],
-    )
+    @action(detail=False, methods=['get'], url_path='my-tasks',
+            permission_classes=[IsAuthenticated])
     def my_tasks(self, request):
         tasks = MainTask.objects.select_related(
-            'created_by', 'assigned_to',
-            'assigned_to__department', 'department',
+            'created_by', 'assigned_to', 'assigned_to__department', 'department',
         ).prefetch_related(
             'attachments', 'attachments__uploaded_by',
         ).filter(assigned_to=request.user)
@@ -351,136 +338,148 @@ class MainTaskViewSet(viewsets.ModelViewSet):
         page = self.paginate_queryset(tasks)
         if page is not None:
             return self.get_paginated_response(
-                MainTaskSerializer(page, many=True,
-                                   context={'request': request}).data
+                MainTaskSerializer(page, many=True, context={'request': request}).data
             )
         return Response(
-            MainTaskSerializer(tasks, many=True,
-                               context={'request': request}).data
+            MainTaskSerializer(tasks, many=True, context={'request': request}).data
         )
 
-    # ── Reports / Stats ───────────────────────────────────────
+    # ── Stats / Reports ───────────────────────────────────────────────────────
 
     @extend_schema(
         summary='Aggregate task statistics for the reports dashboard',
         tags=['Main Tasks'],
     )
-    @action(
-        detail=False, methods=['get'], url_path='stats',
-        permission_classes=[IsAuthenticated],
-    )
+    @action(detail=False, methods=['get'], url_path='stats',
+            permission_classes=[IsAuthenticated])
     def stats(self, request):
-        from django.utils import timezone
-        from django.db.models import Q
-        from datetime import timedelta, date
-
-        today = timezone.now().date()
+        today           = timezone.now().date()
         active_statuses = ['unassigned', 'assigned', 'in_progress']
 
-        # ── KPIs ──────────────────────────────────────────────
-        total     = MainTask.objects.count()
-        completed = MainTask.objects.filter(status='completed').count()
+        # ── KPIs — one DB hit ────────────────────────────────────────────────
+        task_agg = MainTask.objects.aggregate(
+            total    =Count('id'),
+            completed=Count('id', filter=Q(status='completed')),
+            overdue  =Count('id', filter=Q(
+                due_date__lt=today,
+                status__in=active_statuses,
+            )),
+        )
+        total     = task_agg['total']     or 0
+        completed = task_agg['completed'] or 0
         success_rate = round((completed / total * 100) if total > 0 else 0, 1)
 
-        overdue_qs = MainTask.objects.filter(
-            due_date__lt=today,
-            status__in=active_statuses,
+        # FIX #14 — fetch only due_date column; one lightweight query
+        overdue_qs = (
+            MainTask.objects
+            .filter(due_date__lt=today, status__in=active_statuses,
+                    due_date__isnull=False)
+            .values_list('due_date', flat=True)
         )
-        delay_days = [
-            (today - t.due_date).days
-            for t in overdue_qs
-            if t.due_date
-        ]
-        avg_delay = round(sum(delay_days) / len(delay_days), 1) if delay_days else 0.0
+        delay_days = [(today - d).days for d in overdue_qs]
+        avg_delay  = round(sum(delay_days) / len(delay_days), 1) if delay_days else 0.0
 
-        # ── Monthly completion trend (last 6 months) ──────────
+        # ── Monthly completion trend — FIX #13: one query, not six ──────────
+        six_months_ago = (
+            date(today.year, today.month, 1).replace(day=1)
+        )
+        # Go back ~6 months
+        for _ in range(5):
+            m = six_months_ago.month - 1 or 12
+            y = six_months_ago.year - (1 if six_months_ago.month == 1 else 0)
+            six_months_ago = date(y, m, 1)
+
+        monthly_qs = (
+            MainTask.objects
+            .filter(status='completed', updated_at__date__gte=six_months_ago)
+            .annotate(month=TruncMonth('updated_at'))
+            .values('month')
+            .annotate(completed=Count('id'))
+            .order_by('month')
+        )
+        monthly_map = {r['month'].date().replace(day=1): r['completed']
+                       for r in monthly_qs}
+
         monthly_trend = []
         for i in range(5, -1, -1):
-            # compute month start by going back i months from today
             m = today.month - i
             y = today.year + (m - 1) // 12
             m = ((m - 1) % 12) + 1
-            month_start = date(y, m, 1)
-            if m == 12:
-                month_end = date(y + 1, 1, 1)
-            else:
-                month_end = date(y, m + 1, 1)
-
-            count = MainTask.objects.filter(
-                status='completed',
-                updated_at__date__gte=month_start,
-                updated_at__date__lt=month_end,
-            ).count()
+            first = date(y, m, 1)
             monthly_trend.append({
-                'month': month_start.strftime('%b'),
-                'completed': count,
+                'month'    : first.strftime('%b'),
+                'completed': monthly_map.get(first, 0),
             })
 
-        # ── Critical tasks (due ≤ 7 days OR overdue, high/urgent) ──
-        critical_qs = MainTask.objects.filter(
-            Q(due_date__lte=today + timedelta(days=7)),
-            status__in=active_statuses,
-            priority__in=['high', 'urgent'],
-        ).order_by('due_date')[:5]
+        # ── Critical tasks ────────────────────────────────────────────────────
+        critical_qs = (
+            MainTask.objects
+            .filter(
+                Q(due_date__lte=today + timedelta(days=7)),
+                status__in=active_statuses,
+                priority__in=['high', 'urgent'],
+            )
+            .order_by('due_date')[:5]
+        )
+        critical_tasks = [
+            {
+                'id'           : t.id,
+                'title'        : t.title,
+                'priority'     : t.priority,
+                'due_date'     : t.due_date,
+                'days_until_due': (t.due_date - today).days if t.due_date else None,
+                'is_overdue'   : (t.due_date < today) if t.due_date else False,
+            }
+            for t in critical_qs
+        ]
 
-        critical_tasks = []
-        for t in critical_qs:
-            days = (t.due_date - today).days if t.due_date else None
-            critical_tasks.append({
-                'id':           t.id,
-                'title':        t.title,
-                'priority':     t.priority,
-                'due_date':     t.due_date,
-                'days_until_due': days,
-                'is_overdue':   (t.due_date < today) if t.due_date else False,
-            })
-
-        # ── Active milestones (assigned/in_progress with dept) ──
-        milestones_qs = MainTask.objects.select_related(
-            'department', 'assigned_to',
-        ).prefetch_related('subtasks').filter(
-            status__in=['assigned', 'in_progress'],
-        ).order_by('due_date')[:6]
-
+        # ── Active milestones ─────────────────────────────────────────────────
+        milestones_qs = (
+            MainTask.objects
+            .select_related('department', 'assigned_to')
+            .prefetch_related('subtasks')
+            .filter(status__in=['assigned', 'in_progress'])
+            .order_by('due_date')[:6]
+        )
         milestones = []
         for t in milestones_qs:
-            sub_total    = t.subtasks.count()
-            sub_done     = t.subtasks.filter(status='completed').count()
-            progress     = round((sub_done / sub_total * 100) if sub_total > 0 else 0)
+            sub_total = t.subtasks.count()
+            sub_done  = t.subtasks.filter(status='completed').count()
+            progress  = round((sub_done / sub_total * 100) if sub_total > 0 else 0)
 
             if t.due_date:
-                days_left = (t.due_date - today).days
-                if days_left < 0:
-                    task_status = 'delayed'
-                elif days_left <= 3:
-                    task_status = 'at-risk'
-                else:
-                    task_status = 'on-track'
+                days_left   = (t.due_date - today).days
+                task_status = ('delayed' if days_left < 0
+                               else 'at-risk' if days_left <= 3
+                               else 'on-track')
             else:
                 task_status = 'on-track'
 
             milestones.append({
-                'id':        t.id,
-                'title':     t.title,
-                'dept':      t.department.name if t.department else 'Unassigned',
-                'due_date':  t.due_date.strftime('%b %d') if t.due_date else '—',
-                'progress':  progress,
-                'status':    task_status,
+                'id'      : t.id,
+                'title'   : t.title,
+                'dept'    : t.department.name if t.department else 'Unassigned',
+                'due_date': t.due_date.strftime('%b %d') if t.due_date else '—',
+                'progress': progress,
+                'status'  : task_status,
             })
 
         return Response({
             'kpi': {
-                'total_tasks':     total,
+                'total_tasks'    : total,
                 'completed_tasks': completed,
-                'success_rate':    success_rate,
-                'avg_delay_days':  avg_delay,
+                'success_rate'   : success_rate,
+                'avg_delay_days' : avg_delay,
             },
-            'monthly_trend':  monthly_trend,
+            'monthly_trend' : monthly_trend,
             'critical_tasks': critical_tasks,
-            'milestones':     milestones,
+            'milestones'    : milestones,
         })
-    
+
+    # ── Manager Dashboard — FIX #10: single definition, correct decorators ───
+
     @extend_schema(
+        responses={200: ManagerDashboardSerializer},
         summary='Manager dashboard statistics',
         tags=['Main Tasks'],
     )
@@ -489,10 +488,13 @@ class MainTaskViewSet(viewsets.ModelViewSet):
         permission_classes=[IsAuthenticated, IsManager],
     )
     def dashboard(self, request):
-        data       = get_manager_dashboard()
-        serializer = ManagerDashboardSerializer(data)
-        return Response(serializer.data)
+        data = get_manager_dashboard()
+        return Response(ManagerDashboardSerializer(data).data)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SubTaskViewSet
+# ─────────────────────────────────────────────────────────────────────────────
 
 class SubTaskViewSet(
     mixins.CreateModelMixin,
@@ -503,15 +505,13 @@ class SubTaskViewSet(
     viewsets.GenericViewSet,
 ):
     """
-    SubTasks are always accessed under a MainTask:
+    Nested under MainTask:
         /api/tasks/main-tasks/{main_task_pk}/subtasks/
 
     Permissions:
       - List / Retrieve   : Authenticated
-      - Create            : Department Head (of the assigned MainTask)
-      - Update / Delete   : Department Head
-      - assign action     : Department Head
-      - update_status     : Employee (their own subtask) or Dept Head
+      - Create / Update   : Department Head (assigned to the parent MainTask)
+      - update_status     : Employee (their own subtask) or Dept Head / Manager
     """
     serializer_class = SubTaskResponseSerializer
     filter_backends  = [DjangoFilterBackend]
@@ -525,18 +525,20 @@ class SubTaskViewSet(
 
     def get_queryset(self):
         return SubTask.objects.select_related(
-            'main_task', 'created_by',
-            'assigned_to', 'assigned_to__department',
+            'main_task',
+            'created_by',
+            'assigned_to',                  # Employee after FIX #1
+            'assigned_to__department',
         ).filter(main_task_id=self.kwargs['main_task_pk'])
 
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:
             return [IsAuthenticated()]
         if self.action == 'update_status':
-            return [IsAuthenticated()]   # object-level check inside action
+            return [IsAuthenticated()]   # fine-grained check inside the action
         return [IsAuthenticated(), IsDepartmentHead()]
 
-    # ── CRUD ──────────────────────────────────────────────────
+    # ── CRUD ─────────────────────────────────────────────────────────────────
 
     @extend_schema(
         request=SubTaskCreateSerializer,
@@ -548,7 +550,6 @@ class SubTaskViewSet(
     def create(self, request, *args, **kwargs):
         main_task = self._get_main_task()
 
-        # Only the Department Head assigned to this MainTask can create subtasks
         if main_task.assigned_to != request.user:
             return Response(
                 {'detail': 'Only the assigned Department Head can create subtasks.'},
@@ -565,8 +566,7 @@ class SubTaskViewSet(
             created_by=request.user,
             status=SubTask.Status.NOT_STARTED,
         )
-        
-        invalidate_dashboard_cache()  # Clear cache
+        invalidate_dashboard_cache()
         return Response(
             SubTaskResponseSerializer(subtask).data,
             status=status.HTTP_201_CREATED,
@@ -605,7 +605,7 @@ class SubTaskViewSet(
         )
         serializer.is_valid(raise_exception=True)
         subtask = serializer.save()
-        invalidate_dashboard_cache()  # Clear cache
+        invalidate_dashboard_cache()
         return Response(SubTaskResponseSerializer(subtask).data)
 
     @extend_schema(exclude=True)
@@ -620,13 +620,13 @@ class SubTaskViewSet(
     def destroy(self, request, *args, **kwargs):
         subtask = self.get_object()
         subtask.delete()
-        invalidate_dashboard_cache()  # Clear cache
+        invalidate_dashboard_cache()
         return Response(
             {'detail': 'SubTask deleted successfully.'},
             status=status.HTTP_200_OK,
         )
 
-    # ── Assign ────────────────────────────────────────────────
+    # ── Assign ────────────────────────────────────────────────────────────────
 
     @extend_schema(
         request=SubTaskAssignSerializer,
@@ -640,8 +640,8 @@ class SubTaskViewSet(
         permission_classes=[IsAuthenticated, IsDepartmentHead],
     )
     def assign(self, request, **kwargs):
-        subtask    = self.get_object()
-        main_task  = self._get_main_task()
+        subtask   = self.get_object()
+        main_task = self._get_main_task()
 
         if main_task.assigned_to != request.user:
             return Response(
@@ -649,14 +649,11 @@ class SubTaskViewSet(
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        serializer = SubTaskAssignSerializer(
-            subtask, data=request.data, partial=True
-        )
+        serializer = SubTaskAssignSerializer(subtask, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
 
         employee = serializer.validated_data.get('assigned_to')
 
-        # Validate employee belongs to the same department
         if employee.department != main_task.department:
             return Response(
                 {
@@ -669,12 +666,11 @@ class SubTaskViewSet(
             )
 
         serializer.save(status=SubTask.Status.IN_PROGRESS)
-        invalidate_dashboard_cache()  # Clear cache
+        invalidate_dashboard_cache()
         subtask.refresh_from_db()
-
         return Response(SubTaskResponseSerializer(subtask).data)
 
-    # ── Status Update with State Machine ─────────────────────
+    # ── Status Update ─────────────────────────────────────────────────────────
 
     @extend_schema(
         request=SubTaskStatusSerializer,
@@ -695,12 +691,23 @@ class SubTaskViewSet(
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        is_head     = user.role and user.role.name == 'department_head'
-        is_manager  = user.is_superuser or (user.role and user.role.name == 'it')
+        is_head    = user and user.role and user.role.name == 'department_head'
+        is_manager = user and (user.is_superuser or
+                               (user.role and user.role.name == 'it'))
 
-        # Employee can only update their own subtask
+        # ── FIX #7: Employees authenticate via EmployeeJWTAuthentication,
+        #   which sets request.user = None and request.auth = token.
+        #   Compare employee_id from JWT directly against subtask.assigned_to
+        #   (which is now an Employee after FIX #1). ─────────────────────────
         if not is_head and not is_manager:
-            if subtask.assigned_to is None or subtask.assigned_to.id != user.id:
+            token = request.auth
+            if not token or token.get('type') != 'employee':
+                return Response(
+                    {'detail': 'Authentication required.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            employee_id = token.get('employee_id')
+            if subtask.assigned_to is None or subtask.assigned_to.id != employee_id:
                 return Response(
                     {'detail': 'You can only update subtasks assigned to you.'},
                     status=status.HTTP_403_FORBIDDEN,
@@ -720,25 +727,18 @@ class SubTaskViewSet(
             new_status=new_status,
             is_head=is_head or is_manager,
         )
-
         if not valid:
-            return Response(
-                {'detail': error},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return Response({'detail': error}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Save optional fields alongside status
-        serializer = SubTaskStatusSerializer(
-            subtask, data=request.data, partial=True
-        )
+        serializer = SubTaskStatusSerializer(subtask, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
-        invalidate_dashboard_cache()  # Clear cache
+        invalidate_dashboard_cache()
 
         subtask.refresh_from_db()
         return Response(SubTaskResponseSerializer(subtask).data)
 
-    # ── My SubTasks (Employee view) ───────────────────────────
+    # ── My SubTasks (Employee) ────────────────────────────────────────────────
 
     @extend_schema(
         responses={200: SubTaskResponseSerializer(many=True)},
@@ -750,10 +750,6 @@ class SubTaskViewSet(
         permission_classes=[IsAuthenticated],
     )
     def my_subtasks(self, request):
-        """
-        Returns subtasks assigned to the currently logged-in Employee.
-        Reads employee_id from the JWT token payload.
-        """
         token = request.auth
         if not token or token.get('type') != 'employee':
             return Response(
@@ -762,6 +758,7 @@ class SubTaskViewSet(
             )
 
         employee_id = token.get('employee_id')
+        # FIX #4: assigned_to is now an Employee FK — employee_id matches correctly
         subtasks = SubTask.objects.select_related(
             'main_task', 'created_by',
             'assigned_to', 'assigned_to__department',
@@ -773,8 +770,11 @@ class SubTaskViewSet(
                 SubTaskResponseSerializer(page, many=True).data
             )
         return Response(SubTaskResponseSerializer(subtasks, many=True).data)
-    
+
+    # ── Employee Dashboard ────────────────────────────────────────────────────
+
     @extend_schema(
+        responses={200: EmployeeDashboardSerializer},
         summary='Employee personal dashboard statistics',
         tags=['SubTasks'],
     )
@@ -783,8 +783,7 @@ class SubTaskViewSet(
         permission_classes=[IsAuthenticated],
     )
     def employee_dashboard(self, request):
-        from apps.tasks.selectors   import get_employee_dashboard
-        from apps.tasks.serializers import EmployeeDashboardSerializer
+        from apps.tasks.selectors import get_employee_dashboard
 
         token = request.auth
         if not token or token.get('type') != 'employee':
@@ -793,12 +792,31 @@ class SubTaskViewSet(
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        data       = get_employee_dashboard(employee_id=token.get('employee_id'))
-        serializer = EmployeeDashboardSerializer(data)
-        return Response(serializer.data)
+        data = get_employee_dashboard(employee_id=token.get('employee_id'))
+        return Response(EmployeeDashboardSerializer(data).data)
+
+    # ── Department Workload (Department Head) ─────────────────────────────────
+
+    @extend_schema(
+        responses={200: DepartmentWorkloadSerializer(many=True)},
+        summary='Active subtasks count per employee in DH department',
+        description='FR-DH-06: Department Head workload view.',
+        tags=['SubTasks'],
+    )
+    @action(
+        detail=False, methods=['get'], url_path='workload',
+        permission_classes=[IsAuthenticated, IsDepartmentHead],
+    )
+    def department_workload(self, request):
+        # FIX #11: DepartmentWorkloadSerializer now imported at top of file
+        from apps.tasks.selectors import get_department_workload
+        data = get_department_workload(request.user)
+        return Response(DepartmentWorkloadSerializer(data, many=True).data)
 
 
-
+# ─────────────────────────────────────────────────────────────────────────────
+# RequestViewSet
+# ─────────────────────────────────────────────────────────────────────────────
 
 class RequestViewSet(
     mixins.CreateModelMixin,
@@ -807,13 +825,12 @@ class RequestViewSet(
     viewsets.GenericViewSet,
 ):
     """
-    Handles Extension and Exemption requests submitted by Employees
-    and reviewed by Department Heads.
+    Handles Extension and Exemption requests.
 
     Permissions:
-      - Create          : Employee (via JWT employee token)
+      - Create          : Employee (JWT employee token)
       - List / Retrieve : Authenticated
-      - review action   : Department Head
+      - review          : Department Head
       - my_requests     : Employee
       - pending         : Department Head
     """
@@ -835,12 +852,12 @@ class RequestViewSet(
 
     def get_permissions(self):
         if self.action == 'create':
-            return [IsAuthenticated()]   # employee check is inside the view
-        if self.action == 'review':
+            return [IsAuthenticated()]   # employee guard is inside the action
+        if self.action in ['review', 'pending']:
             return [IsAuthenticated(), IsDepartmentHead()]
         return [IsAuthenticated()]
 
-    # ── Create (Employee only) ────────────────────────────────
+    # ── Create (Employee only) ────────────────────────────────────────────────
 
     @extend_schema(
         request=RequestCreateSerializer,
@@ -849,7 +866,6 @@ class RequestViewSet(
         tags=['Requests'],
     )
     def create(self, request, *args, **kwargs):
-        # Only employees can submit requests
         token = request.auth
         if not token or token.get('type') != 'employee':
             return Response(
@@ -875,7 +891,6 @@ class RequestViewSet(
             employee=employee,
             status=Request.Status.PENDING,
         )
-
         return Response(
             RequestResponseSerializer(req).data,
             status=status.HTTP_201_CREATED,
@@ -897,7 +912,7 @@ class RequestViewSet(
     def retrieve(self, request, *args, **kwargs):
         return super().retrieve(request, *args, **kwargs)
 
-    # ── Review (Department Head only) ─────────────────────────
+    # ── Review (Department Head) ──────────────────────────────────────────────
 
     @extend_schema(
         request=RequestReviewSerializer,
@@ -911,20 +926,15 @@ class RequestViewSet(
         permission_classes=[IsAuthenticated, IsDepartmentHead],
     )
     def review(self, request, pk=None):
-        from django.utils import timezone
-
         req = self.get_object()
 
-        # Can only review pending requests
         if req.status != Request.Status.PENDING:
             return Response(
                 {'detail': f'This request has already been {req.status}.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Department Head can only review requests for their subtasks
-        subtask_head = req.subtask.main_task.assigned_to
-        if subtask_head != request.user:
+        if req.subtask.main_task.assigned_to != request.user:
             return Response(
                 {'detail': 'You can only review requests for subtasks in your assigned tasks.'},
                 status=status.HTTP_403_FORBIDDEN,
@@ -935,34 +945,27 @@ class RequestViewSet(
 
         new_status = serializer.validated_data['status']
 
-        # If approved extension request — extend the subtask due date
         if (new_status == Request.Status.APPROVED
                 and req.request_type == Request.RequestType.EXTENSION
                 and req.extension_days):
-            from datetime import timedelta
             subtask = req.subtask
             if subtask.due_date:
-                subtask.due_date = subtask.due_date + timedelta(days=req.extension_days)
+                subtask.due_date += timedelta(days=req.extension_days)
                 subtask.save(update_fields=['due_date', 'updated_at'])
 
-        # If approved exemption — unassign employee from the subtask
         if (new_status == Request.Status.APPROVED
                 and req.request_type == Request.RequestType.EXEMPTION):
             req.subtask.assigned_to = None
             req.subtask.status      = SubTask.Status.NOT_STARTED
             req.subtask.save(update_fields=['assigned_to', 'status', 'updated_at'])
 
-        serializer.save(
-            reviewed_by=request.user,
-            reviewed_at=timezone.now(),
-        )
-        
-        invalidate_dashboard_cache()  # Clear cache as task data changed
+        serializer.save(reviewed_by=request.user, reviewed_at=timezone.now())
+        invalidate_dashboard_cache()
 
         req.refresh_from_db()
         return Response(RequestResponseSerializer(req).data)
 
-    # ── My Requests (Employee) ────────────────────────────────
+    # ── My Requests (Employee) ────────────────────────────────────────────────
 
     @extend_schema(
         responses={200: RequestResponseSerializer(many=True)},
@@ -982,18 +985,18 @@ class RequestViewSet(
             )
 
         employee_id = token.get('employee_id')
-        requests = Request.objects.select_related(
+        requests_qs = Request.objects.select_related(
             'subtask', 'subtask__main_task', 'employee', 'reviewed_by',
         ).filter(employee_id=employee_id).order_by('-submitted_at')
 
-        page = self.paginate_queryset(requests)
+        page = self.paginate_queryset(requests_qs)
         if page is not None:
             return self.get_paginated_response(
                 RequestResponseSerializer(page, many=True).data
             )
-        return Response(RequestResponseSerializer(requests, many=True).data)
+        return Response(RequestResponseSerializer(requests_qs, many=True).data)
 
-    # ── Pending requests (Department Head) ────────────────────
+    # ── Pending (Department Head) ─────────────────────────────────────────────
 
     @extend_schema(
         responses={200: RequestResponseSerializer(many=True)},
@@ -1005,20 +1008,16 @@ class RequestViewSet(
         permission_classes=[IsAuthenticated, IsDepartmentHead],
     )
     def pending(self, request):
-        """
-        Returns all PENDING requests for subtasks under MainTasks
-        assigned to the current Department Head.
-        """
-        requests = Request.objects.select_related(
+        requests_qs = Request.objects.select_related(
             'subtask', 'subtask__main_task', 'employee', 'reviewed_by',
         ).filter(
             status=Request.Status.PENDING,
             subtask__main_task__assigned_to=request.user,
         ).order_by('-submitted_at')
 
-        page = self.paginate_queryset(requests)
+        page = self.paginate_queryset(requests_qs)
         if page is not None:
             return self.get_paginated_response(
                 RequestResponseSerializer(page, many=True).data
             )
-        return Response(RequestResponseSerializer(requests, many=True).data)
+        return Response(RequestResponseSerializer(requests_qs, many=True).data)

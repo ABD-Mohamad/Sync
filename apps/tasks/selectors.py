@@ -339,3 +339,56 @@ def get_employee_performance(today=None):
     
     cache.set(cache_key, result, timeout=CACHE_TTL_DASHBOARD)
     return result
+
+
+def get_department_workload(user, today=None):
+    """
+    FR-DH-06: Department Head Workload View.
+    Returns active subtasks count per employee in the DH's department.
+    """
+    if today is None:
+        today = timezone.now().date()
+    
+    if not user.department:
+        return []
+
+    # Import here to avoid circular imports at module level
+    from apps.accounts.models import Employee
+    
+    active_statuses = ['not_started', 'in_progress', 'awaiting_review']
+    
+    workload = (
+        Employee.objects.filter(
+            department=user.department,
+            status='active'
+        )
+        .annotate(
+            active_subtasks_count=Count(
+                'assigned_subtasks',
+                filter=Q(
+                    assigned_subtasks__status__in=active_statuses,
+                    assigned_subtasks__due_date__gte=today
+                ),
+                distinct=True
+            ),
+            # Additional metrics for context
+            overdue_subtasks_count=Count(
+                'assigned_subtasks',
+                filter=Q(
+                    assigned_subtasks__due_date__lt=today,
+                    assigned_subtasks__status__in=active_statuses
+                ),
+                distinct=True
+            )
+        )
+        .values(
+            'id', 
+            'full_name', 
+            'email',
+            'active_subtasks_count',
+            'overdue_subtasks_count'
+        )
+        .order_by('-active_subtasks_count')
+    )
+    
+    return list(workload)
