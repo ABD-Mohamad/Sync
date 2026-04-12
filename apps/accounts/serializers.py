@@ -33,7 +33,26 @@ class UniqueEmailMixin:
 # ─── User Serializers ─────────────────────────────────────────
 
 class UserCreateSerializer(UniqueEmailMixin, serializers.ModelSerializer):
+    """
+    Used by the IT manager to create new web users.
+
+    FIX: role is now a SlugRelatedField that accepts role names ('it',
+    'department_head') instead of the FK primary key.  The Angular
+    frontend always sends role as a string slug — the backend looked up
+    the Role object by name via SlugRelatedField.
+
+    Previously this was an implicit PrimaryKeyRelatedField which meant
+    the frontend had to know the Role PK, requiring an extra /roles/
+    fetch.  Slug-based lookup removes that round-trip.
+    """
     email_model = User
+
+    role = serializers.SlugRelatedField(
+        slug_field='name',
+        queryset=Role.objects.all(),
+        allow_null=True,
+        required=False,
+    )
 
     class Meta:
         model            = User
@@ -55,7 +74,7 @@ class UserResponseSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'email', 'full_name', 'role',
             'department', 'must_change_password',
-            'is_superuser',    
+            'is_superuser',
         ]
 
 
@@ -66,7 +85,6 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = User
-        # FIX #2: is_superuser added here as well for profile endpoint.
         fields = [
             'id', 'email', 'full_name', 'role',
             'department', 'must_change_password', 'is_superuser', 'permissions',
@@ -157,7 +175,7 @@ class UnifiedChangePasswordSerializer(serializers.Serializer):
 
     def validate_new_password(self, value):
         from django.contrib.auth.password_validation import validate_password
-        validate_password(value)   # runs all AUTH_PASSWORD_VALIDATORS
+        validate_password(value)
         return value
 
     def validate(self, data):
@@ -207,3 +225,71 @@ class ProfileSerializer(serializers.ModelSerializer):
         if not all(isinstance(s, str) for s in value):
             raise serializers.ValidationError('Each skill must be a string.')
         return value
+
+
+# ─── Employee Performance Serializers ────────────────────────
+#
+# FIX: These serializers were previously in apps/tasks/serializers.py
+# and imported from apps/accounts/views.py (EmployeeViewSet).
+#
+# That caused a circular import at startup because INSTALLED_APPS loads
+# 'apps.accounts' BEFORE 'apps.tasks'. When accounts/urls.py triggered
+# accounts/views.py at module level, importing from tasks/serializers.py
+# tried to load tasks/models.py before the tasks app registry was ready
+# → AppRegistryNotReady.
+#
+# Defining them here in accounts/serializers.py removes the cross-app
+# import entirely.  tasks/serializers.py keeps its own WarningEntrySerializer
+# (used only by ManagerDashboardSerializer inside tasks).
+#
+# ─── Action required in accounts/views.py ────────────────────────────────
+# Change:
+#   from apps.tasks.serializers import WarningListSerializer
+# To:
+#   from apps.accounts.serializers import WarningListSerializer
+
+class EmployeePerformanceSummarySerializer(serializers.Serializer):
+    total_staff      = serializers.IntegerField()
+    avg_performance  = serializers.FloatField()
+    avg_delay_rate   = serializers.FloatField()
+    compliance_rate  = serializers.FloatField()
+    critical_delays  = serializers.IntegerField()
+
+
+class EmployeePerformanceRowSerializer(serializers.Serializer):
+    id                = serializers.IntegerField()
+    full_name         = serializers.CharField()
+    email             = serializers.EmailField()
+    dept_name         = serializers.CharField(allow_null=True)
+    status            = serializers.CharField()
+    total_sub         = serializers.IntegerField()
+    completion_rate   = serializers.FloatField()
+    delay_rate        = serializers.FloatField()
+    performance_score = serializers.FloatField()
+    performance_label = serializers.CharField()
+
+
+class EmployeeDirectorySerializer(serializers.Serializer):
+    """
+    Used by GET /api/accounts/employees/performance/
+    Wraps the output of tasks.selectors.get_employee_performance().
+    """
+    summary   = EmployeePerformanceSummarySerializer()
+    employees = EmployeePerformanceRowSerializer(many=True)
+
+
+class WarningListSerializer(serializers.Serializer):
+    """
+    Used by GET /api/accounts/employees/warnings/ (or similar action
+    in EmployeeViewSet).  Includes extra fields (performance_score,
+    performance_label) compared to ManagerDashboard's WarningEntrySerializer.
+    """
+    id                = serializers.IntegerField()
+    full_name         = serializers.CharField()
+    email             = serializers.EmailField()
+    dept_name         = serializers.CharField(allow_null=True)
+    delay_rate        = serializers.FloatField()
+    completion_rate   = serializers.FloatField()
+    performance_score = serializers.FloatField()
+    performance_label = serializers.CharField()
+    last_activity     = serializers.DateTimeField(allow_null=True, required=False)

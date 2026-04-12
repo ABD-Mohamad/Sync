@@ -10,13 +10,14 @@ from rest_framework.response     import Response
 from rest_framework_simplejwt.tokens     import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from drf_spectacular.utils       import extend_schema, OpenApiResponse
-
+from apps.tasks.serializers import DepartmentWorkloadSerializer
 from apps.accounts.models      import User, Employee, Department, Profile
 from apps.accounts.serializers import (
     UserCreateSerializer, UserResponseSerializer,
     EmployeeCreateSerializer, EmployeeResponseSerializer,
     UserProfileSerializer, DepartmentSerializer,
-    UnifiedLoginSerializer, UnifiedChangePasswordSerializer, ProfileSerializer
+    UnifiedLoginSerializer, UnifiedChangePasswordSerializer, ProfileSerializer , 
+    WarningListSerializer 
 )
 from apps.accounts.permissions import IsITOrAdmin
 from apps.accounts.throttles   import LoginRateThrottle, SensitiveEndpointThrottle
@@ -32,7 +33,7 @@ from apps.accounts.audit import audit_action, AuditLog, get_client_ip
 from apps.accounts.cookies import set_auth_cookies
 from django.utils import timezone
 from apps.tasks.selectors import get_employee_performance
-
+from apps.accounts.permissions import IsManager, IsDepartmentHead
 class BaseAccountViewSet(
     mixins.CreateModelMixin,
     mixins.ListModelMixin,
