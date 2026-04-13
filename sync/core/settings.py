@@ -2,7 +2,10 @@
 from pathlib import Path
 from decouple import config
 from corsheaders.defaults import default_headers 
+import firebase_admin
+from firebase_admin import credentials
 BASE_DIR = Path(__file__).resolve().parent.parent
+
  
 # ─── Security ────────────────────────────────────────────
 SECRET_KEY = config('SECRET_KEY')
@@ -272,3 +275,8 @@ CHANNEL_LAYERS = {
         },
     },
 }
+FIREBASE_CREDENTIALS_PATH = BASE_DIR / 'firebase-service-account.json'
+
+if FIREBASE_CREDENTIALS_PATH.exists():
+    cred = credentials.Certificate(str(FIREBASE_CREDENTIALS_PATH))
+    firebase_admin.initialize_app(cred)

@@ -114,6 +114,12 @@ class User(AbstractUser):
     USERNAME_FIELD  = 'email'
     REQUIRED_FIELDS = ['full_name']
     must_change_password = models.BooleanField(default=False)
+    fcm_token = models.CharField(
+        max_length=500,
+        blank=True,
+        null=True,
+        help_text='Firebase Cloud Messaging token for web notifications.'
+    )
     
     def __str__(self):
         return f'{self.full_name} ({self.email})'
@@ -153,6 +159,12 @@ class Employee(models.Model):
     password   = models.CharField(max_length=128)  # stores hashed password
     must_change_password = models.BooleanField(default=False)
     last_login = models.DateTimeField(null=True, blank=True)
+    fcm_token = models.CharField(
+        max_length=500,
+        blank=True,
+        null=True,
+        help_text='Firebase Cloud Messaging token for mobile/web notifications.'
+    )
 
     hired_at   = models.DateField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True , null=True)

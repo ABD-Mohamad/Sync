@@ -23,3 +23,5 @@ redis_data/
 # VS Code / editors
 .vscode/
 *.swp
+
+firebase-service-account.json
