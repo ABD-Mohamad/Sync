@@ -46,6 +46,7 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
  
 # ─── Middleware ───────────────────────────────────────────
 MIDDLEWARE = [
+    'apps.accounts.signing.RequestSigningMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -241,6 +242,28 @@ SPECTACULAR_SETTINGS = {
     },
     'SECURITY': [{'BearerAuth': []}],
 }
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+        },
+    },
+    'loggers': {
+        'apps.accounts': {
+            'handlers': ['console'],
+            'level': 'DEBUG',
+        },
+        'django.request': {
+            'handlers': ['console'],
+            'level': 'DEBUG',
+        },
+    },
+}
+AUTHENTICATION_BACKENDS = [
+    'django.contrib.auth.backends.ModelBackend',
+]
 
 # ── Storage ───────────────────────────────────────────────────
 INSTALLED_APPS += ['storages']

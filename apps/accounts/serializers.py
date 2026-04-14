@@ -67,7 +67,7 @@ class UserCreateSerializer(UniqueEmailMixin, serializers.ModelSerializer):
 
 class UserResponseSerializer(serializers.ModelSerializer):
     role       = serializers.SlugRelatedField(slug_field='name', read_only=True)
-    department = serializers.StringRelatedField()
+    department = serializers.SerializerMethodField()
 
     class Meta:
         model  = User
@@ -77,10 +77,20 @@ class UserResponseSerializer(serializers.ModelSerializer):
             'is_superuser',
         ]
 
+    def get_department(self, obj):
+        # Primary: user.department FK
+        if obj.department:
+            return str(obj.department)
+        # Fallback: check if this user is currently the head of any department
+        # (handles the case where Department.head was set from the department side
+        # but User.department FK was not yet synced)
+        dept = obj.headed_departments.first()
+        return str(dept) if dept else None
+
 
 class UserProfileSerializer(serializers.ModelSerializer):
     role        = serializers.SlugRelatedField(slug_field='name', read_only=True)
-    department  = serializers.StringRelatedField()
+    department  = serializers.SerializerMethodField()
     permissions = serializers.SerializerMethodField()
 
     class Meta:
@@ -89,6 +99,14 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'id', 'email', 'full_name', 'role',
             'department', 'must_change_password', 'is_superuser', 'permissions',
         ]
+
+    def get_department(self, obj):
+        # Primary: user.department FK
+        if obj.department:
+            return str(obj.department)
+        # Fallback: reverse lookup via Department.head
+        dept = obj.headed_departments.first()
+        return str(dept) if dept else None
 
     def get_permissions(self, obj):
         if obj.is_superuser:
@@ -159,6 +177,37 @@ class DepartmentSerializer(serializers.ModelSerializer):
                 'Assigned head must have the Department Head role.'
             )
         return user
+
+    def update(self, instance, validated_data):
+        new_head = validated_data.get('head', instance.head)
+        old_head = instance.head
+
+        instance = super().update(instance, validated_data)
+
+        # ── Sync User.department when head changes ──────────────────
+        # When we assign a new head, set their User.department so that
+        # the login profile returns the correct department (not null).
+        if new_head and new_head != old_head:
+            new_head.department = instance
+            new_head.save(update_fields=['department'])
+
+        # If the old head was removed, clear their department FK
+        if old_head and old_head != new_head:
+            old_head.department = None
+            old_head.save(update_fields=['department'])
+
+        return instance
+
+    def create(self, validated_data):
+        head = validated_data.get('head')
+        instance = super().create(validated_data)
+
+        # Sync User.department on initial creation with a head
+        if head:
+            head.department = instance
+            head.save(update_fields=['department'])
+
+        return instance
 
 
 # ─── Auth Serializers ─────────────────────────────────────────

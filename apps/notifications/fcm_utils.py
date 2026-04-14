@@ -1,28 +1,5 @@
 # apps/notifications/fcm_utils.py
 #
-# Firebase Cloud Messaging (FCM) utility — Web Push Notifications only.
-#
-# Architecture:
-#   • User (DH / IT)  → receives FCM via User.fcm_token (added by migration)
-#   • Employee        → receives FCM via Employee.fcm_token (added by migration)
-#
-# Setup:
-#   1.  pip install firebase-admin
-#   2.  Download your Firebase service account JSON from:
-#         Firebase Console → Project Settings → Service Accounts
-#   3.  Set  FIREBASE_CREDENTIALS_PATH  in settings.py (see below)
-#   4.  Add your Firebase Web config to Angular app (firebase.config.ts)
-#
-# settings.py additions needed:
-#   FIREBASE_CREDENTIALS_PATH = BASE_DIR / 'firebase-service-account.json'
-#
-# Routing logic (called from signals.py):
-#   FCM  → HIGH/URGENT MainTask created/updated  → Department Head
-#   FCM  → EXEMPTION request submitted           → Department Head
-#   FCM  → Request status change (A/R)           → Employee
-#   FCM  → New SubTask assigned                  → Employee
-#   WS   → LOW/MEDIUM MainTask created/updated   → Department Head (via existing utils.py)
-#   WS   → EXTENSION request submitted           → Department Head (via existing utils.py)
 
 import logging
 from typing import Optional

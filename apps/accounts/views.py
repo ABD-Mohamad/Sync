@@ -30,7 +30,7 @@ from apps.accounts.utils import (
     send_employee_welcome_email,
 )
 from apps.accounts.audit import audit_action, AuditLog, get_client_ip
-from apps.accounts.cookies import set_auth_cookies
+from apps.accounts.cookies import set_auth_cookies, clear_auth_cookies
 from django.utils import timezone
 from apps.tasks.selectors import get_employee_performance
 from apps.accounts.permissions import IsManager, IsDepartmentHead
@@ -372,6 +372,11 @@ class EmployeeViewSet(BaseAccountViewSet):
         return Response(data)
 
 class AuthViewSet(viewsets.GenericViewSet):
+    """
+    Unified Authentication ViewSet.
+    Handles login, password changes, token refreshing, and logout 
+    for both system Users and Employees using HttpOnly cookies.
+    """
     permission_classes = [AllowAny]
 
     @extend_schema(
@@ -391,7 +396,7 @@ class AuthViewSet(viewsets.GenericViewSet):
         email    = serializer.validated_data['email']
         password = serializer.validated_data['password']
 
-        # ── Try User first ────────────────────────────────────────────
+        # ── Try System User first ────────────────────────────────────────────
         user = authenticate(request, email=email, password=password)
         if user is not None:
             if not user.is_active:
@@ -399,11 +404,14 @@ class AuthViewSet(viewsets.GenericViewSet):
                     {'detail': 'Account is inactive.'},
                     status=status.HTTP_403_FORBIDDEN,
                 )
+            
+            # Log successful login
             AuditLog.objects.create(
                 actor=user, action=AuditLog.Action.LOGIN,
                 resource='User', resource_id=str(user.id),
                 ip_address=get_client_ip(request),
             )
+            
             tokens   = get_tokens_for_user(user)
             response = Response({
                 'account_type'        : 'user',
@@ -413,7 +421,6 @@ class AuthViewSet(viewsets.GenericViewSet):
             return set_auth_cookies(response, tokens['access'], tokens['refresh'])
 
         # authenticate() returned None — could be wrong password OR inactive user
-        # Check if the user exists but is inactive to return the correct status code
         try:
             existing_user = User.objects.get(email=email)
             if not existing_user.is_active:
@@ -439,7 +446,7 @@ class AuthViewSet(viewsets.GenericViewSet):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
-        if employee.status != Employee.Status.ACTIVE:
+        if employee.status != 'active': # Matches Employee.Status.ACTIVE
             return Response(
                 {'detail': 'Account is inactive.'},
                 status=status.HTTP_403_FORBIDDEN,
@@ -480,7 +487,7 @@ class AuthViewSet(viewsets.GenericViewSet):
         old_password = serializer.validated_data['old_password']
         new_password = serializer.validated_data['new_password']
 
-        # ── Employee ──────────────────────────────────────────
+        # ── Employee Case ──────────────────────────────────────────
         if token.get('type') == 'employee':
             try:
                 employee = Employee.objects.get(id=token['employee_id'])
@@ -498,7 +505,7 @@ class AuthViewSet(viewsets.GenericViewSet):
             employee.must_change_password = False
             employee.save()
 
-        # ── User ──────────────────────────────────────────────
+        # ── System User Case ──────────────────────────────────────────
         else:
             user = request.user
             if not user or not user.is_authenticated:
@@ -523,8 +530,6 @@ class AuthViewSet(viewsets.GenericViewSet):
     )
     @action(detail=False, methods=['post'], url_path='refresh')
     def refresh(self, request):
-        from apps.accounts.cookies import set_auth_cookies
-
         raw_refresh = (
             request.COOKIES.get('refresh_token')
             or request.data.get('refresh')
@@ -556,9 +561,9 @@ class AuthViewSet(viewsets.GenericViewSet):
             response = Response({'detail': 'Token refreshed.'})
             return set_auth_cookies(response, tokens['access'], tokens['refresh'])
 
-        # ── User refresh ──────────────────────────────────────
+        # ── System User refresh ──────────────────────────────────────
         try:
-            peeked.blacklist()
+            peeked.blacklist() # Rotate the token
             user     = User.objects.select_related('role').get(id=peeked['user_id'])
             tokens   = get_tokens_for_user(user)
             response = Response({'detail': 'Token refreshed.'})
@@ -579,6 +584,7 @@ class AuthViewSet(viewsets.GenericViewSet):
         permission_classes=[IsAuthenticated],
     )
     def profile(self, request):
+        # Always return the profile of the currently logged-in user
         return Response(UserProfileSerializer(request.user).data)
 
     @extend_schema(
@@ -590,8 +596,6 @@ class AuthViewSet(viewsets.GenericViewSet):
         permission_classes=[AllowAny],
     )
     def logout(self, request):
-        from apps.accounts.cookies import clear_auth_cookies
-
         raw_refresh = (
             request.COOKIES.get('refresh_token')
             or request.data.get('refresh')
@@ -603,7 +607,7 @@ class AuthViewSet(viewsets.GenericViewSet):
             except Exception:
                 pass
 
-        # Only log for Django Users
+        # Log logout for System Users
         if request.user and request.user.is_authenticated:
             AuditLog.objects.create(
                 actor=request.user,
@@ -618,8 +622,6 @@ class AuthViewSet(viewsets.GenericViewSet):
             status=status.HTTP_200_OK,
         )
         return clear_auth_cookies(response)
-
-
 class DepartmentViewSet(
     mixins.CreateModelMixin,
     mixins.ListModelMixin,
