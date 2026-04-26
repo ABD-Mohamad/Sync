@@ -55,7 +55,7 @@ class EmployeeJWTAuthentication(BaseAuthentication):
         if employee.status != Employee.Status.ACTIVE:
             raise AuthenticationFailed('Employee account is inactive.')
 
-        return (None, token)
+        return (employee, token)
 
 
 class UnifiedJWTAuthentication(JWTAuthentication):

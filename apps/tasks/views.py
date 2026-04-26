@@ -532,7 +532,7 @@ class SubTaskViewSet(
         ).filter(main_task_id=self.kwargs['main_task_pk'])
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'my_subtasks', 'employee_dashboard']:
             return [IsAuthenticated()]
         if self.action == 'update_status':
             return [IsAuthenticated()]   # fine-grained check inside the action

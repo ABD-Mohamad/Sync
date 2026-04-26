@@ -185,6 +185,13 @@ class Employee(models.Model):
     def __str__(self):
         return f'{self.full_name} ({self.department})'
 
+    @property
+    def is_authenticated(self):
+        return True
+
+    @property
+    def role(self):
+        return None
     class Meta:
         verbose_name = 'Employee'
         verbose_name_plural = 'Employees'
